@@ -31,8 +31,8 @@ federation:
 # Map shared scalars to Go types.
 models:
   UUID:
-    model: github.com/5007-Capstone/chora/services/chora-bff-gateway/internal/graphql.UUID
+    model: github.com/apollo-chora/chora-gateway/internal/graphql.UUID
   DateTime:
-    model: github.com/5007-Capstone/chora/services/chora-bff-gateway/internal/graphql.DateTime
+    model: github.com/apollo-chora/chora-gateway/internal/graphql.DateTime
   JSON:
-    model: github.com/5007-Capstone/chora/services/chora-bff-gateway/internal/graphql.JSON
+    model: github.com/apollo-chora/chora-gateway/internal/graphql.JSON

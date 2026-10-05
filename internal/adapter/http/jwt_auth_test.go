@@ -50,7 +50,7 @@ import (
 
 const (
 	chsTestIssuer   = "https://api.chora.site"
-	chsTestAudience = "chora-489812"
+	chsTestAudience = "chora-local"
 )
 
 var chsTestSigner = []byte("test-chora-session-signer-key-must-be-at-least-32-bytes-long")

@@ -47,7 +47,7 @@ func TestSetupTenant_HappyPath_FansOutAndCombinesResponses(t *testing.T) {
 		seenIdentityBody = string(b)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"019e0000-0000-7000-8000-iiiiiiiiiiii","tenant_id":"01970000-0000-7000-8000-aaaaaaaaaaaa","provider_type":"oidc","client_id":"acme","client_secret_name":"projects/chora-489812/secrets/sm-name","discovery_url":"https://issuer.example/openid","singpass_enabled":false,"created_at":"2026-06-07T00:00:00Z","updated_at":"2026-06-07T00:00:00Z"}`))
+		_, _ = w.Write([]byte(`{"id":"019e0000-0000-7000-8000-iiiiiiiiiiii","tenant_id":"01970000-0000-7000-8000-aaaaaaaaaaaa","provider_type":"oidc","client_id":"acme","client_secret_name":"projects/chora-local/secrets/sm-name","discovery_url":"https://issuer.example/openid","singpass_enabled":false,"created_at":"2026-06-07T00:00:00Z","updated_at":"2026-06-07T00:00:00Z"}`))
 	})
 	tenancy := newStubUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 		seenTenancyPath = r.URL.Path

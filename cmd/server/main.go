@@ -2,7 +2,7 @@
 //
 // Service: chora-gateway (BFF for the 5 CHORA Angular surfaces — A+, C+,
 // H+, O+, R+).
-// Project: chora-489812 (Team 3 / Platform).
+// Project: chora-local (Team 3 / Platform).
 // Surface fan-out: aggregates upstream domain services into per-surface views.
 // Trace role: ROOT — generates W3C traceparent if absent, propagates to all
 // upstream calls (per Tier 3 D13).

@@ -424,7 +424,7 @@ func TestKGCanvas_DefaultJWTGate_IncludesPrefixes(t *testing.T) {
 func TestKGCanvas_UnauthenticatedAtEdge_401(t *testing.T) {
 	v, err := chorasession.NewValidator(
 		[]byte("test-chora-session-signer-key-must-be-at-least-32-bytes-long"),
-		"https://api.chora.site", "chora-489812")
+		"https://api.chora.site", "chora-local")
 	if err != nil {
 		t.Fatalf("NewValidator: %v", err)
 	}

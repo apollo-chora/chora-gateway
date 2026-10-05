@@ -1,0 +1,38 @@
+# gqlgen configuration for the chora-bff-gateway federated learner schema.
+#
+# This is informational at present — the schema.go in this package implements
+# the same federation surface the gqlgen-generated code would. When we move
+# to full gqlgen codegen (post-M12), this file becomes the canonical config.
+#
+# Source-of-truth schemas: ../../../../chora-contracts/graphql/*.graphql.
+
+schema:
+  - ../../../../chora-contracts/graphql/learner.graphql
+  - ../../../../chora-contracts/graphql/engagement.graphql
+  - ../../../../chora-contracts/graphql/gamification.graphql
+  - ../../../../chora-contracts/graphql/companion.graphql
+  - ../../../../chora-contracts/graphql/circle.graphql
+
+exec:
+  filename: schema_gen.go
+  package: graphql
+
+resolver:
+  layout: follow-schema
+  dir: resolvers
+  package: resolvers
+  filename_template: "{name}.resolvers.go"
+
+federation:
+  filename: federation_gen.go
+  package: graphql
+  version: 2
+
+# Map shared scalars to Go types.
+models:
+  UUID:
+    model: github.com/5007-Capstone/chora/services/chora-bff-gateway/internal/graphql.UUID
+  DateTime:
+    model: github.com/5007-Capstone/chora/services/chora-bff-gateway/internal/graphql.DateTime
+  JSON:
+    model: github.com/5007-Capstone/chora/services/chora-bff-gateway/internal/graphql.JSON

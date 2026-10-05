@@ -1,0 +1,32 @@
+# Local secrets/config
+.env
+.env.*
+!.env.example
+
+# Go build/test output
+*.test
+*.out
+coverage.out
+cover.out
+
+# Binaries
+/service
+/server
+*.exe
+*.dll
+*.so
+*.dylib
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.pem
+*.key

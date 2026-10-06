@@ -1,117 +1,109 @@
 # chora-gateway
 
-> Production BFF (Backend-For-Frontend) / API gateway for the 5 CHORA Angular
-> surfaces (A+, C+, H+, O+, R+). Aggregates upstream domain services into
-> per-surface composed views; acts as the trace ROOT.
+## About
 
-Standalone, provider-neutral service. Shared Chora modules are consumed as Go modules
-(`github.com/apollo-chora/chora-common`, `github.com/apollo-chora/chora-contracts`).
-Asynchronous delivery uses NATS JetStream (`chora-common/eventbus`); tracing
-uses OTLP (`OTEL_EXPORTER_OTLP_ENDPOINT`).
+`chora-gateway` is the Go backend-for-frontend (BFF) for the five CHORA Angular surfaces: A+, C+, H+, O+, and R+. It exposes REST and GraphQL endpoints, composes responses from CHORA domain services, and carries authenticated tenant and user context to upstream HTTP calls. The service also initializes OpenTelemetry tracing and can publish asynchronous events through the NATS JetStream event bus.
 
-## Hexagonal layout
+## Quick start
 
-```
-cmd/server/                                  — main + boot env gate + session + mint + stripe-config loaders
-internal/domain/{route,session,aggregate}/   — pure domain (no infra imports)
-internal/adapter/{http,inmem,upstream,clients}/ — port implementations
-internal/aggregator/{phyllis,social,...}/    — outbound fan-out aggregators
-internal/graphql/{resolvers,schema.go}       — federated GraphQL (learner reads)
-internal/observability/                      — OTLP + W3C traceparent
+Prerequisites: Go 1.26.1 or newer and access to the CHORA upstream services used by the gateway.
+
+Copy the example environment file and set the required values:
+
+```bash
+cp .env.example .env
 ```
 
-## Auth
+The gateway requires these environment variables at startup:
 
-`POST /api/v1/auth/session/mint` exchanges a username/password pair for a
-Chora session JWT:
-
-```json
-// request
-{"username": "alice", "password": "..."}
-// 200
-{"access_token": "<jwt>", "token_type": "Bearer", "expires_in": 3600,
- "gcid": "<uuid>", "memberships": [{"tenant_id": "<uuid>", "roles": ["learner"]}]}
-// 401
-{"error": {"code": "INVALID_CREDENTIALS", "message": "..."}}
+```text
+CHORA_SESSION_SIGNER
+CHORA_SESSION_ISSUER
+CHORA_SESSION_AUDIENCE
+SVC_TENANCY_URL
+SVC_CREATION_URL
+SVC_CONSUMPTION_URL
+SVC_SHARING_URL
+SVC_DELIVERY_URL
+SVC_GOVERNANCE_URL
+SVC_OBSERVABILITY_URL
+SVC_NOTIFICATIONS_URL
 ```
 
-Flow: the gateway calls chora-identity `POST /v1/auth/verify-credentials`
-(`CHORA_IDENTITY_URL`, default `http://identity:8080`) and mints an HS256
-session JWT from the authoritative `gcid`, `active_tenant_id` and
-`active_tenant_roles` it returns. The JWT is signed with `CHORA_SESSION_SIGNER`
-(shared with chora-identity; no key exchange) and carries `iss`, `aud`, `sub`,
-`gcid`, `tenant_id`, `email`, `roles`, `role_summary`, `iat`, `exp`.
+Each `SVC_*_URL` value must be an absolute `http://` or `https://` URL. `CHORA_SESSION_SIGNER` is the HS256 signing key shared with chora-identity.
 
-The `/api/*` trust boundary validates that session JWT (`chorasession.Validator`)
-and stamps `servicemesh.MeshClaims{GCID, TenantID, Roles}`. The validated
-session's tenant stays authoritative; a client-supplied tenant is only a request
-checked against it (`tenant_scope.go`).
+Run the server:
 
-The `platform_operator` role is membership-backed (it arrives in
-`active_tenant_roles`); it is not stamped from any email list. A member holding
-`instructor` additionally carries the derived `training_admin` label.
+```bash
+go run ./cmd/server
+```
 
-## Endpoints
+By default it listens on port 8080. Set `PORT` to use another port. For a local configuration, `.env.example` also provides defaults for `CHORA_IDENTITY_URL`, tracing, and NATS.
 
-| Path                                              | Method   | Auth          | Description |
-|---------------------------------------------------|----------|---------------|-------------|
-| `/healthz`, `/healthz/`, `/health`                | GET      | public        | liveness |
-| `/readyz`                                         | GET      | public        | route-table dump |
-| `/version`                                        | GET      | public        | service banner |
-| `/api/auth/session`                               | POST/DEL | public        | mint/revoke opaque session |
-| `/bff/{aplus,cplus,hplus,oplus,rplus}/...`        | GET      | session-based | per-surface composed views |
-| `/api/v1/auth/session/mint`                       | POST     | public        | username/password → Chora session JWT |
-| `/api/me`, `/api/me/roles`, `/api/tenants/me`     | GET      | ChoraSession  | Phyllis identity fan-out |
-| `/api/courses`, `/api/catalog`, `/api/enrollments`| GET/POST | ChoraSession  | Phyllis course/catalog fan-out |
-| `/api/atoms/{id}`, `.../feedback`                 | GET/POST | ChoraSession  | Phyllis atom fan-out |
-| `/api/ai/generate`                                | POST     | ChoraSession  | Model Broker Gateway proxy |
-| `/api/companion/{me,daily-dose}`                   | GET      | ChoraSession  | Phyllis Companion fan-out |
-| `/api/me/consents`, `.../grant`                   | GET/POST | ChoraSession  | GDPR consent center |
-| `/api/me/data-export`                             | POST     | ChoraSession  | GDPR Art. 15/20 |
-| `/api/me/account-closure`                         | POST     | ChoraSession  | GDPR Art. 17 (federated saga trigger) |
-| `/v1/feed`, `/v1/me/social`, `/v1/posts/*`, ...   | GET/POST | ChoraSession  | C+ social aggregator |
-| `/graphql`, `/graphql/`                           | GET/POST | ChoraSession  | Federated learner-read schema |
-| `/api/proxy/{service}/*`                          | any      | session-based | generic upstream proxy |
+## Usage
 
-## Environment configuration
+The service exposes public health and service-information endpoints:
 
-No inline URLs / secrets / audience identifiers in source. All values resolve
-from environment variables. See `.env.example`.
+- `GET /healthz`, `GET /healthz/`, `GET /health` returns a 200 liveness response.
+- `GET /readyz` returns the registered route table.
+- `GET /version` returns the service name and version.
+- `GET /` returns a service description and the five supported surfaces.
 
-### Boot-time fail-loud env gate
+Authentication is provided through two session paths:
 
-`CheckBootEnv` runs in `main()` BEFORE handler registration and exits 1 with a
-clear log on any missing required env var.
+`POST /api/v1/auth/session/mint` exchanges username/password credentials with chora-identity and mints a Chora session JWT. The route can be disabled with `MINT_DISABLED=true`.
 
-| Env var | Required | Purpose |
-|---|---|---|
-| `CHORA_SESSION_SIGNER` | yes | HS256 signing key (≥32 bytes), shared with chora-identity |
-| `CHORA_SESSION_ISSUER` | yes | iss claim baked into minted JWTs |
-| `CHORA_SESSION_AUDIENCE` | yes | aud claim baked into minted JWTs |
-| `CHORA_IDENTITY_URL` | no | chora-identity base URL (default `http://identity:8080`) |
-| `CHORA_SESSION_TTL_SECONDS` | no | session lifetime (default 3600) |
-| `CHORA_SOURCE_PROJECT` | no | logical project label (default `chora-local`) |
-| `SVC_TENANCY_URL` | yes | chora-tenancy base URL |
-| `SVC_CREATION_URL` | yes | chora-creation base URL |
-| `SVC_CONSUMPTION_URL` | yes | chora-consumption base URL |
-| `SVC_SHARING_URL` | yes | chora-sharing base URL |
-| `SVC_DELIVERY_URL` | yes | chora-delivery base URL |
-| `SVC_GOVERNANCE_URL` | yes | chora-governance base URL |
-| `SVC_OBSERVABILITY_URL` | yes | chora-observability base URL |
-| `SVC_NOTIFICATIONS_URL` | yes | chora-notifications base URL |
+`POST /api/auth/session` creates the older server-side session flow from a Bearer JWT, and `DELETE /api/auth/session` signs out that session.
 
-`SVC_*_URL` values must parse as absolute http(s) URLs.
+The BFF composition endpoints are:
 
-### Tracing
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/bff/aplus/home` | GET | Composes learning path, recent atoms, and companion data. |
+| `/bff/cplus/feed` | GET | Returns the C+ social feed view. |
+| `/bff/hplus/tenant` | GET | Returns tenant and entitlement data. |
+| `/bff/oplus/governance` | GET | Returns governance and audit-event data. |
+| `/bff/rplus/courses` | GET | Returns the R+ course view. |
 
-`OTEL_EXPORTER_OTLP_ENDPOINT` (when unset, spans stream to stdout). Trace
-deep-links in O+ responses use `CHORA_TRACE_UI_URL` (self-hosted tracing UI;
-unset omits the link).
+GraphQL is exposed at `/graphql` and `/graphql/`, with aliases at `/api/v1/graphql` and `/api/v1/graphql/`. The current implementation is a hand-coded dispatcher for learner-facing reads and includes engagement, gamification, companion, circle, and stitched `learner` queries. `GET` returns endpoint metadata; `POST` accepts a JSON body containing `query`, with optional `operationName` and `variables`.
 
-## Build & test
+`GET /api/proxy/{service}/{path}` is also registered. In the current handler implementation this route returns a skeleton response describing the requested target and the headers that would be stamped for an upstream call.
+
+The gateway uses the real HTTP upstream adapter when `BFF_HTTPUPSTREAM_ENABLED=true`. Otherwise it selects the fake upstream implementation. The HTTP adapter maps gateway operations to the following downstream routes:
+
+| Gateway operation | Upstream |
+| --- | --- |
+| Learning path | `SVC_CONSUMPTION_URL/api/learning-paths` |
+| Recent atoms | `SVC_CREATION_URL/api/atoms?status=published` |
+| Companion | `SVC_CONSUMPTION_URL/companion/me` |
+| Social feed | `SVC_SHARING_URL/v1/feed` |
+| Tenant | `SVC_TENANCY_URL/tenants/{tenant_id}` |
+| Governance | `SVC_GOVERNANCE_URL/governance/{tenant_id}` |
+| Audit events | `SVC_OBSERVABILITY_URL/events?tenant_id={tenant_id}` |
+| Courses | `SVC_DELIVERY_URL/courses` |
+
+When the HTTP upstream adapter is active, outbound requests can carry the Bearer token, tenant and GCID mesh metadata, W3C `traceparent`, and role information from the validated session context.
+
+Tracing is configured with `OTEL_EXPORTER_OTLP_ENDPOINT`. When it is unset, the observability package falls back to stdout. `CHORA_TRACE_UI_URL` controls optional trace deep-links used by O+ responses.
+
+## Development
+
+The repository is a standalone Go module:
+
+```text
+github.com/apollo-chora/chora-gateway
+```
+
+Build, vet, and test it with the standard Go commands:
 
 ```bash
 go build ./...
 go vet ./...
 go test ./...
 ```
+
+The main executable is in `cmd/server`. HTTP handlers and middleware are under `internal/adapter/http` and `internal/middleware`. HTTP clients and upstream selection live in `internal/adapter/upstream` and `internal/adapter/clients`. BFF aggregation logic is under `internal/aggregator`, domain types and repositories are under `internal/domain`, and the learner-facing GraphQL gateway is under `internal/graphql`.
+
+`Dockerfile` builds the service from the repository root and produces a non-root distroless runtime image. The GitHub Actions workflow publishes `walfa/chora-gateway` for `linux/amd64` and `linux/arm64` on pushes to `main` and on version tags.
+
+For local environment setup, start from `.env.example`. The process performs a boot-time environment check before binding its HTTP port and exits when required variables are missing or malformed.

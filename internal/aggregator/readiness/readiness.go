@@ -37,7 +37,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -641,16 +640,6 @@ func actionFor(key string) string {
 	default:
 		return ""
 	}
-}
-
-// SortedKeys is a helper for callers that need a stable row-key list.
-func SortedKeys(rows []readinessRowDTO) []string {
-	out := make([]string, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, r.Key)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // LoadConfigFromEnv reads the downstream bases from the environment, per

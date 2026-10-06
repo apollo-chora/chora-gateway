@@ -32,6 +32,7 @@ import (
 
 	"github.com/apollo-chora/chora-gateway/internal/adapter/clients"
 	httpadapter "github.com/apollo-chora/chora-gateway/internal/adapter/http"
+	"github.com/apollo-chora/chora-gateway/internal/domain/session"
 )
 
 const (
@@ -66,7 +67,7 @@ var ErrMintConfigMissing = errors.New("mint config missing required env var")
 // NewMintHandlerFromEnv constructs the mint handler entirely from env vars.
 // Returns (nil, nil) when MINT_DISABLED=true so callers can boot without the
 // route during local dev.
-func NewMintHandlerFromEnv(ctx context.Context) (*httpadapter.MintHandler, func() error, error) {
+func NewMintHandlerFromEnv(ctx context.Context, sessions session.Repository) (*httpadapter.MintHandler, func() error, error) {
 	noop := func() error { return nil }
 	if strings.EqualFold(strings.TrimSpace(os.Getenv(EnvMintDisabled)), "true") {
 		return nil, noop, nil
@@ -106,6 +107,7 @@ func NewMintHandlerFromEnv(ctx context.Context) (*httpadapter.MintHandler, func(
 	cfg := httpadapter.MintHandlerConfig{
 		Credentials:   credsClient,
 		Identity:      identityClient,
+		Sessions:      sessions,
 		SessionSigner: []byte(signer),
 		SessionIssuer: sessionIssuer,
 		SessionAud:    sessionAud,

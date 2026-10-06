@@ -17,6 +17,7 @@ import (
 
 	"github.com/apollo-chora/chora-gateway/internal/adapter/clients"
 	httpadapter "github.com/apollo-chora/chora-gateway/internal/adapter/http"
+	"github.com/apollo-chora/chora-gateway/internal/adapter/inmem"
 )
 
 const (
@@ -105,6 +106,7 @@ func newMintFixtureWith(t *testing.T, mutate func(*httpadapter.MintHandlerConfig
 	cfg := httpadapter.MintHandlerConfig{
 		Credentials:   creds,
 		Identity:      identity,
+		Sessions:      inmem.NewSessionRepository(),
 		SessionSigner: []byte(mintTestSigner),
 		SessionIssuer: mintTestIssuer,
 		SessionAud:    mintTestAud,

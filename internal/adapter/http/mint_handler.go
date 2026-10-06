@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/apollo-chora/chora-gateway/internal/adapter/clients"
+	"github.com/apollo-chora/chora-gateway/internal/domain/session"
 	"github.com/google/uuid"
 )
 
@@ -83,7 +84,8 @@ type CredentialsVerifier interface {
 type MintHandler struct {
 	creds         CredentialsVerifier
 	identity      IdentityResolver // WebAuthn login/finish only
-	sessionSigner []byte           // HS256 signing key
+	sessions      session.Repository
+	sessionSigner []byte // HS256 signing key
 	sessionIssuer string
 	sessionAud    string
 	sessionTTL    time.Duration
@@ -96,7 +98,13 @@ type MintHandlerConfig struct {
 	// Credentials verifies the username/password pair (REQUIRED).
 	Credentials CredentialsVerifier
 	// Identity resolves GCID + memberships for the WebAuthn path (REQUIRED).
-	Identity      IdentityResolver
+	Identity IdentityResolver
+	// Sessions persists the minted session so the BFF's session-based auth
+	// middleware can resolve identity from the returned token. REQUIRED: the
+	// middleware looks sessions up by token, so a mint that does not Save one
+	// leaves /bff/* and /api/v1/graphql upstream calls carrying no
+	// tenant/gcid.
+	Sessions      session.Repository
 	SessionSigner []byte // HS256 secret bytes — must be ≥32 bytes
 	SessionIssuer string // e.g. "https://api.chora.site"
 	SessionAud    string // e.g. "chora-local"
@@ -126,6 +134,9 @@ func NewMintHandler(cfg MintHandlerConfig) (*MintHandler, error) {
 	if cfg.SessionTTL <= 0 {
 		cfg.SessionTTL = time.Hour
 	}
+	if cfg.Sessions == nil {
+		return nil, errors.New("mint: session repository required (the BFF auth middleware resolves tenant/gcid from the persisted session)")
+	}
 	if cfg.Now == nil {
 		cfg.Now = func() time.Time { return time.Now().UTC() }
 	}
@@ -135,6 +146,7 @@ func NewMintHandler(cfg MintHandlerConfig) (*MintHandler, error) {
 	return &MintHandler{
 		creds:         cfg.Credentials,
 		identity:      cfg.Identity,
+		sessions:      cfg.Sessions,
 		sessionSigner: append([]byte(nil), cfg.SessionSigner...),
 		sessionIssuer: cfg.SessionIssuer,
 		sessionAud:    cfg.SessionAud,
@@ -275,6 +287,22 @@ func (h *MintHandler) mintFromIdentity(w http.ResponseWriter, r *http.Request, g
 	if err != nil {
 		h.writeMintError(w, http.StatusInternalServerError,
 			"AUTH_SESSION_MINT_FAILED", err.Error())
+		return
+	}
+	// Persist the session under the JWT itself. The BFF's session-based auth
+	// middleware resolves tenant/gcid by looking the token up in this store, so
+	// without the save every /bff/* and /api/v1/graphql upstream call goes out
+	// with no identity and the callee answers 401.
+	if err := h.sessions.Save(r.Context(), &session.Session{
+		Token:     access,
+		Gcid:      gcid,
+		TenantID:  tenantID,
+		Roles:     append([]string(nil), activeRoles...),
+		IssuedAt:  now,
+		ExpiresAt: now.Add(h.sessionTTL),
+	}); err != nil {
+		h.writeMintError(w, http.StatusInternalServerError,
+			"AUTH_SESSION_PERSIST_FAILED", err.Error())
 		return
 	}
 	if memberships == nil {

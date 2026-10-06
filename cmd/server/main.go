@@ -163,7 +163,7 @@ func main() {
 	// username/password pair for a Chora session JWT. Wrapped OUTSIDE the IDP
 	// JWT prefix gate because this IS the auth-establishing endpoint — clients
 	// haven't got a Chora session yet when they hit it.
-	mintHandler, mintCleanup, err := NewMintHandlerFromEnv(ctx)
+	mintHandler, mintCleanup, err := NewMintHandlerFromEnv(ctx, sessionsRepo)
 	if err != nil {
 		log.Fatalf("mint handler init failed: %v", err)
 	}

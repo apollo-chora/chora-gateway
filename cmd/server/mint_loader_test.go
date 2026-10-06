@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"github.com/apollo-chora/chora-gateway/internal/adapter/inmem"
 	"testing"
 	"time"
 )
@@ -44,7 +45,7 @@ func TestParseTTLSecondsOrDefault(t *testing.T) {
 
 func TestNewMintHandlerFromEnv_DisabledReturnsNilHandler(t *testing.T) {
 	t.Setenv(EnvMintDisabled, "true")
-	h, cleanup, err := NewMintHandlerFromEnv(context.Background())
+	h, cleanup, err := NewMintHandlerFromEnv(context.Background(), inmem.NewSessionRepository())
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -66,7 +67,7 @@ func TestNewMintHandlerFromEnv_FailsLoudOnEachRequiredEnv(t *testing.T) {
 			t.Setenv(EnvChoraSessionAudience, "chora-local")
 			t.Setenv(EnvIdentityURL, "http://127.0.0.1:1")
 			t.Setenv(missing, "")
-			if _, _, err := NewMintHandlerFromEnv(context.Background()); err == nil {
+			if _, _, err := NewMintHandlerFromEnv(context.Background(), inmem.NewSessionRepository()); err == nil {
 				t.Fatalf("want error when %s is blank", missing)
 			}
 		})
@@ -79,7 +80,7 @@ func TestNewMintHandlerFromEnv_Wires(t *testing.T) {
 	t.Setenv(EnvChoraSessionIssuer, "https://api.chora.site")
 	t.Setenv(EnvChoraSessionAudience, "chora-local")
 	t.Setenv(EnvIdentityURL, "http://127.0.0.1:1")
-	h, cleanup, err := NewMintHandlerFromEnv(context.Background())
+	h, cleanup, err := NewMintHandlerFromEnv(context.Background(), inmem.NewSessionRepository())
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -99,7 +100,7 @@ func TestNewMintHandlerFromEnv_RejectsShortSigner(t *testing.T) {
 	t.Setenv(EnvChoraSessionSigner, "too-short")
 	t.Setenv(EnvChoraSessionIssuer, "https://api.chora.site")
 	t.Setenv(EnvChoraSessionAudience, "chora-local")
-	if _, _, err := NewMintHandlerFromEnv(context.Background()); err == nil {
+	if _, _, err := NewMintHandlerFromEnv(context.Background(), inmem.NewSessionRepository()); err == nil {
 		t.Fatal("want error on <32-byte signer")
 	}
 }

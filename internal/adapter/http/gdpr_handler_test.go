@@ -11,9 +11,14 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	httpadapter "github.com/apollo-chora/chora-gateway/internal/adapter/http"
+	"github.com/apollo-chora/chora-gateway/internal/adapter/inmem"
+	"github.com/apollo-chora/chora-gateway/internal/adapter/upstream"
 	"github.com/apollo-chora/chora-gateway/internal/aggregator/phyllis"
 )
 
@@ -124,20 +129,27 @@ func TestGdpr_GrantConsent_RejectsNonPost(t *testing.T) {
 func TestGdpr_DataExport_HappyPath(t *testing.T) {
 	identity := newDownstream(t, http.StatusAccepted, `{"export_id":"01900-export","status":"queued","sla_days":30}`)
 	cfg := buildPhyllisConfig(map[string]string{"identity": identity.URL})
-	srv := newPhyllisServer(t, cfg, nil)
+	cfg.PerCallTimeout = 1 * time.Second
+	cfg.AggregationBudget = 5 * time.Second
+	router := httpadapter.NewRouterWithPhyllis(
+		inmem.NewRouteRepository(), inmem.NewSessionRepository(),
+		upstream.NewFakeUpstream(), phyllis.New(cfg, nil),
+	)
 
-	body := `{"format":"portable_json"}`
-	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/api/me/data-export", strings.NewReader(body))
+	// chora-identity resolves the GCID from the path, so the export route now
+	// needs a resolved identity. In production RequireChoraSessionJWT stamps
+	// it; here we inject the validated mesh claims directly.
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+		"/api/me/data-export", strings.NewReader(`{"format":"portable_json"}`))
 	req.Header.Set("Authorization", "Bearer phyllis")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	req = req.WithContext(httpadapter.InjectMeshClaimsForTest(req.Context(), "gcid-export", "tenant-1"))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Errorf("status = %d; want 202", w.Code)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted {
-		t.Errorf("status = %d; want 202", resp.StatusCode)
-	}
-	if identity.lastPath != "/me/portability/export" {
-		t.Errorf("downstream path = %s; want /me/portability/export", identity.lastPath)
+	if identity.lastPath != "/api/users/gcid-export/portability/export" {
+		t.Errorf("downstream path = %s; want /api/users/gcid-export/portability/export", identity.lastPath)
 	}
 }

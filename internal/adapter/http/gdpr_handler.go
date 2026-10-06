@@ -4,7 +4,11 @@
 //
 //	GET    /api/me/consents           — chora-identity:/me/consents (list)
 //	POST   /api/me/consents/grant     — chora-identity:/me/consents (toggle)
-//	POST   /api/me/data-export        — chora-identity:/me/portability/export
+//	POST   /api/me/data-export        — chora-identity:/api/users/{gcid}/portability/export
+//
+// NOTE: chora-identity serves NO consent route (/me/consents does not exist),
+// so the two consent routes 404 at the callee. No correct identity path is
+// known; see the GDPR report in the gateway fix handoff.
 //
 // Account closure (GDPR Art. 17) is served by the canonical closure saga
 // me-route POST /api/v1/me/account/close (CHO-1719, closure_handler.go); the

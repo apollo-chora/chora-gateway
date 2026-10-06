@@ -6,8 +6,9 @@
 //	GetLearningPath → chora-consumption  GET /api/learning-paths
 //	GetRecentAtoms  → chora-creation     GET /api/atoms?status=published
 //	GetCompanion     → chora-consumption  GET /companion/me
-//	GetFeed         → chora-sharing      GET /v1/feed
-//	GetTenant       → chora-tenancy      GET /tenants/{id}
+//	GetStreak       → chora-consumption  GET /v1/me/streak
+//	GetFeed         → chora-sharing      GET /v1/feed/shared-atoms
+//	GetTenant       → chora-tenancy      GET /api/tenants/{id}
 //	GetGovernance   → chora-governance   GET /governance/{tenant_id}
 //	GetAuditEvents  → chora-observability GET /events?tenant_id=X
 //	GetCourses      → chora-delivery     GET /courses
@@ -315,17 +316,39 @@ func (h *HTTPUpstream) GetCompanion(ctx context.Context, tenantID, gcid string) 
 	return classifyJSON("GetCompanion", h.call(ctx, "upstream.GetCompanion", http.MethodGet, u, auth))
 }
 
-// GetFeed → chora-sharing GET /v1/feed.
+// GetStreak → chora-consumption GET /v1/me/streak.
+//
+// Backs the GraphQL `myStreak` query (a live Daily Dose read). Callee:
+// chora-consumption handleMeStreak (internal/adapter/http/router.go:637),
+// which returns streakResp {learner_gcid, count, last_activity_at}.
+func (h *HTTPUpstream) GetStreak(ctx context.Context, tenantID, gcid string) (any, error) {
+	if h.shouldFail("GetStreak") {
+		return nil, fmt.Errorf("%w: failure injection", ErrUpstream)
+	}
+	u := h.cfg.ConsumptionURL + "/v1/me/streak"
+	auth := stampAuthFromContext(ctx, tenantID, gcid)
+	return classifyJSON("GetStreak", h.call(ctx, "upstream.GetStreak", http.MethodGet, u, auth))
+}
+
+// GetFeed → chora-sharing GET /v1/feed/shared-atoms.
+//
+// chora-sharing mounts the learner feed at /v1/feed/shared-atoms
+// (internal/adapter/http/handlers.go:387); there is no bare /v1/feed route,
+// so the old path 404'd and classifyJSON turned that into a silent empty feed.
 func (h *HTTPUpstream) GetFeed(ctx context.Context, tenantID, gcid string) (any, error) {
 	if h.shouldFail("GetFeed") {
 		return nil, fmt.Errorf("%w: failure injection", ErrUpstream)
 	}
-	u := h.cfg.SharingURL + "/v1/feed"
+	u := h.cfg.SharingURL + "/v1/feed/shared-atoms"
 	auth := stampAuthFromContext(ctx, tenantID, gcid)
 	return classifyJSON("GetFeed", h.call(ctx, "upstream.GetFeed", http.MethodGet, u, auth))
 }
 
-// GetTenant → chora-tenancy GET /tenants/{id}.
+// GetTenant → chora-tenancy GET /api/tenants/{id}.
+//
+// chora-tenancy mounts the tenant detail handler under /api/tenants/
+// (internal/adapter/http/handlers.go:76); the legacy /tenants/{id} path 404'd.
+// Mirrors the verified phyllis.GetMyTenant + gatewayproxy.GetTenant path.
 func (h *HTTPUpstream) GetTenant(ctx context.Context, tenantID, gcid string) (any, error) {
 	if h.shouldFail("GetTenant") {
 		return nil, fmt.Errorf("%w: failure injection", ErrUpstream)
@@ -333,7 +356,7 @@ func (h *HTTPUpstream) GetTenant(ctx context.Context, tenantID, gcid string) (an
 	if h.cfg.TenancyURL == "" {
 		return nil, fmt.Errorf("%w: GetTenant: empty TenancyURL", ErrUpstream)
 	}
-	u := h.cfg.TenancyURL + "/tenants/" + url.PathEscape(tenantID)
+	u := h.cfg.TenancyURL + "/api/tenants/" + url.PathEscape(tenantID)
 	auth := stampAuthFromContext(ctx, tenantID, gcid)
 	return classifyJSON("GetTenant", h.call(ctx, "upstream.GetTenant", http.MethodGet, u, auth))
 }

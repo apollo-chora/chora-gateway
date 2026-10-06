@@ -32,6 +32,7 @@ package readiness
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -65,8 +66,10 @@ const DefaultPerCallTimeout = 4 * time.Second
 // two have different fixes and conflating them sends an operator hunting an
 // outage that is really a missing environment variable.
 type Config struct {
-	// TenancyURL serves the hierarchy, the tenant record and the add-on
-	// selections.
+	// TenancyURL serves the tenant record (GET /api/v1/tenants/me) and the
+	// add-on entitlement selections. It does NOT serve the tenant hierarchy:
+	// that read is gRPC-only (Tenancy/GetTenantHierarchy), so the rows it
+	// would feed declare a known_gap.
 	TenancyURL string
 	// IdentityURL serves the IdP providers and the member roster.
 	IdentityURL string
@@ -247,6 +250,15 @@ type membersWire struct {
 	} `json:"items"`
 }
 
+// errHierarchyNotHTTP marks the tenant-hierarchy read as unavailable over
+// HTTP. chora-tenancy serves the direct-children hierarchy ONLY over the
+// Tenancy/GetTenantHierarchy gRPC RPC (tenancy-admin.yaml
+// §/api/v1/tenancy/tenants/current/hierarchy documents that the gateway
+// proxies it over gRPC); there is no HTTP route for it. This HTTP-only
+// aggregator therefore cannot read it, so the two rows it feeds report
+// unknown with a reason rather than a fabricated count.
+var errHierarchyNotHTTP = errors.New("readiness: tenant hierarchy is served over gRPC, not HTTP")
+
 // GetReadiness reads every source in parallel and renders one row per check.
 func (a *Aggregator) GetReadiness(ctx context.Context, auth AuthCtx) (Response, error) {
 	var (
@@ -257,14 +269,13 @@ func (a *Aggregator) GetReadiness(ctx context.Context, auth AuthCtx) (Response, 
 		addonsCR  callResult
 		membersCR callResult
 	)
-	wg.Add(5)
+	// The hierarchy is gRPC-only; no HTTP call is made. The two rows it feeds
+	// (organisation, content) render unknown via errHierarchyNotHTTP.
+	hierCR = callResult{err: errHierarchyNotHTTP}
+	wg.Add(4)
 	go func() {
 		defer wg.Done()
-		hierCR = a.call(ctx, a.cfg.TenancyURL+"/api/v1/tenancy/tenants/current/hierarchy", auth)
-	}()
-	go func() {
-		defer wg.Done()
-		tenantCR = a.call(ctx, a.cfg.TenancyURL+"/v1/tenants/me", auth)
+		tenantCR = a.call(ctx, a.cfg.TenancyURL+"/api/v1/tenants/me", auth)
 	}()
 	go func() {
 		defer wg.Done()
@@ -274,7 +285,7 @@ func (a *Aggregator) GetReadiness(ctx context.Context, auth AuthCtx) (Response, 
 	}()
 	go func() {
 		defer wg.Done()
-		idpCR = a.call(ctx, a.cfg.IdentityURL+"/v1/tenants/me/idp-providers", auth)
+		idpCR = a.call(ctx, a.cfg.IdentityURL+"/api/v1/tenants/me/idp-providers", auth)
 	}()
 	go func() {
 		defer wg.Done()
@@ -320,6 +331,16 @@ func (a *Aggregator) GetReadiness(ctx context.Context, auth AuthCtx) (Response, 
 // records the failure in the right bucket: a request failure is a part_error,
 // an unset URL is a known_gap. They need different fixes.
 func (a *Aggregator) unknownRow(key, label string, cr callResult, dto *readinessDTO) readinessRowDTO {
+	if errors.Is(cr.err, errHierarchyNotHTTP) {
+		// A protocol mismatch, not a request failure: the hierarchy is served
+		// over gRPC, so no amount of retrying this HTTP call will answer it.
+		// Declaring it a known_gap keeps it out of part_errors (which would
+		// otherwise mark the whole response partial for a source that was
+		// never reachable this way).
+		dto.KnownGaps[key] = "tenant_hierarchy_is_read_over_grpc_not_http"
+		return readinessRowDTO{Key: key, Label: label, Status: StatusUnknown,
+			Reason: "This deployment reads the tenant hierarchy over gRPC; this HTTP check cannot reach it."}
+	}
 	if strings.TrimSpace(cr.err.Error()) == "readiness: empty url" {
 		dto.KnownGaps[key] = "downstream_not_configured"
 		return readinessRowDTO{Key: key, Label: label, Status: StatusUnknown,

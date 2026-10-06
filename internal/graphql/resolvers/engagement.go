@@ -90,6 +90,59 @@ func (r *EngagementResolver) DailyDose(ctx context.Context) (any, error) {
 	}, nil
 }
 
+// MyStreak resolves the `myStreak` query — the current learner's daily
+// streak, backed by chora-consumption GET /v1/me/streak.
+//
+// The SPA posts this root from the Daily Dose surface (chora-web
+// core/graphql/queries.ts QUERY_MY_STREAK); before this resolver existed the
+// dispatcher answered GRAPHQL_UNKNOWN_FIELD and the streak was silently
+// dropped. chora-consumption's streakResp carries `count` + `last_activity_at`
+// (internal/adapter/http/me_streak_xp_handlers.go:26); those map onto the FE's
+// camelCase currentDays / lastActivityAt. `longestStreak` and `status` have no
+// producer on that endpoint today, so they are forwarded only when a future
+// callee adds them rather than invented here.
+func (r *EngagementResolver) MyStreak(ctx context.Context) (any, error) {
+	tenantID, gcid := r.CtxIdentity(ctx)
+	authCtx := withResolverAuthCtx(ctx, tenantID, gcid)
+	v, err := r.Upstream.GetStreak(authCtx, tenantID, gcid)
+	if err != nil {
+		return nil, err
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	out := map[string]any{}
+	if n, ok := numericField(m["count"]); ok {
+		out["currentDays"] = n
+	}
+	if s, ok := m["last_activity_at"].(string); ok && s != "" {
+		out["lastActivityAt"] = s
+	}
+	if n, ok := numericField(m["longest_streak"]); ok {
+		out["longestStreak"] = n
+	}
+	if s, ok := m["status"].(string); ok && s != "" {
+		out["status"] = s
+	}
+	return out, nil
+}
+
+// numericField reads an integer from a decoded-JSON or Go-typed value.
+// HTTPUpstream payloads decode numbers as float64; FakeUpstream returns int.
+func numericField(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	default:
+		return 0, false
+	}
+}
+
 // DiscoveryFeed resolves the `discoveryFeed(seedAtomId, depth)` query —
 // KnowledgeGraph traversal for Discovery / curiosity-driven mode.
 func (r *EngagementResolver) DiscoveryFeed(_ context.Context, seedAtomID string, depth int) ([]any, error) {

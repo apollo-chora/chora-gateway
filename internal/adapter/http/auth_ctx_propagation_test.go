@@ -70,6 +70,11 @@ func (c *capturingUpstream) GetCompanion(ctx context.Context, tenantID, gcid str
 	return map[string]any{"companion_id": "f1"}, nil
 }
 
+func (c *capturingUpstream) GetStreak(ctx context.Context, tenantID, gcid string) (any, error) {
+	c.record("GetStreak", ctx)
+	return map[string]any{"count": 1}, nil
+}
+
 func (c *capturingUpstream) GetFeed(ctx context.Context, tenantID, gcid string) (any, error) {
 	c.record("GetFeed", ctx)
 	return map[string]any{"posts": []any{}}, nil

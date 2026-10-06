@@ -45,11 +45,14 @@ func newStub(t *testing.T, byPath map[string]stubResp) (*httptest.Server, *stubD
 func healthy(t *testing.T) map[string]stubResp {
 	t.Helper()
 	return map[string]stubResp{
-		"/api/v1/tenancy/tenants/current/hierarchy": {200, `{"is_parent":true,"children":[{"tenant_id":"t-1","tenant_name":"Northwind","user_count":3,"atom_count":24}]}`},
-		"/v1/tenants/me":                {200, `{"tenant_id":"t-1","branding":{"primary_color_hex":"#0f766e"},"wizard_completed_at":"2026-09-01T10:00:00Z"}`},
-		"/v1/tenants/me/idp-providers":  {200, `{"items":[{"provider_type":"oidc"}]}`},
-		"/api/tenants/t-1/entitlements": {200, entitlementsBody(t, "core", "tms")},
-		"/api/v1/admin/tenant-members":  {200, `{"items":[{"gcid":"g-1","roles":["admin"]},{"gcid":"g-2","roles":["learner"]}]}`},
+		// NOTE: the tenant hierarchy is deliberately absent. chora-tenancy
+		// serves it over the Tenancy/GetTenantHierarchy gRPC RPC only, so this
+		// HTTP aggregator never calls it; organisation/content render unknown
+		// with a known_gap rather than a fabricated count.
+		"/api/v1/tenants/me":               {200, `{"tenant_id":"t-1","branding":{"primary_color_hex":"#0f766e"},"wizard_completed_at":"2026-09-01T10:00:00Z"}`},
+		"/api/v1/tenants/me/idp-providers": {200, `{"items":[{"provider_type":"oidc"}]}`},
+		"/api/tenants/t-1/entitlements":    {200, entitlementsBody(t, "core", "tms")},
+		"/api/v1/admin/tenant-members":     {200, `{"items":[{"gcid":"g-1","roles":["admin"]},{"gcid":"g-2","roles":["learner"]}]}`},
 	}
 }
 
@@ -96,10 +99,37 @@ func TestReadiness_EveryRowIsPresentEvenWhenHealthy(t *testing.T) {
 }
 
 func TestReadiness_HealthyRowsReportOk(t *testing.T) {
+	// organisation + content are excluded: their source (the tenant
+	// hierarchy) is gRPC-only, so this HTTP aggregator always renders them
+	// unknown — see TestReadiness_HierarchyRowsDeclareTheGRPCOnlyGap.
 	dto := build(t, healthy(t))
-	for _, key := range []string{"organisation", "branding", "signIn", "administrators", "content", "setup"} {
+	for _, key := range []string{"branding", "signIn", "administrators", "setup"} {
 		if got := rowByKey(t, dto, key).Status; got != StatusOK {
 			t.Errorf("row %s = %q, want ok", key, got)
+		}
+	}
+}
+
+// TestReadiness_HierarchyRowsDeclareTheGRPCOnlyGap pins the honest answer for
+// the two rows whose only source is a gRPC RPC this HTTP aggregator cannot
+// reach. They must be unknown with a reason AND a known_gap (not a
+// part_error, which would mark the response partial for a source that was
+// never reachable over HTTP).
+func TestReadiness_HierarchyRowsDeclareTheGRPCOnlyGap(t *testing.T) {
+	dto := build(t, healthy(t))
+	for _, key := range []string{"organisation", "content"} {
+		row := rowByKey(t, dto, key)
+		if row.Status != StatusUnknown {
+			t.Errorf("row %s = %q, want unknown", key, row.Status)
+		}
+		if strings.TrimSpace(row.Reason) == "" {
+			t.Errorf("row %s must carry a reason", key)
+		}
+		if dto.KnownGaps[key] == "" {
+			t.Errorf("row %s must declare a known_gap", key)
+		}
+		if _, bad := dto.PartErrors[key]; bad {
+			t.Errorf("row %s must NOT be a part_error (it is a protocol gap, not a failed request)", key)
 		}
 	}
 }
@@ -211,12 +241,13 @@ func TestReadiness_FeaturesReadsATenantTheRegistryNeverHydrated(t *testing.T) {
 
 func TestReadiness_EmptyInstanceFlagsTheRowsThatNeedAction(t *testing.T) {
 	f := healthy(t)
-	f["/api/v1/tenancy/tenants/current/hierarchy"] = stubResp{200, `{"is_parent":false,"children":[]}`}
-	f["/v1/tenants/me/idp-providers"] = stubResp{200, `{"items":[]}`}
+	f["/api/v1/tenants/me/idp-providers"] = stubResp{200, `{"items":[]}`}
 	f["/api/v1/admin/tenant-members"] = stubResp{200, `{"items":[]}`}
 	dto := build(t, f)
 
-	for _, key := range []string{"organisation", "signIn", "administrators", "content"} {
+	// organisation/content are not listed: they are unknown (gRPC-only
+	// source), and unknown is deliberately not actionable.
+	for _, key := range []string{"signIn", "administrators"} {
 		if got := rowByKey(t, dto, key).Status; got != StatusAttention {
 			t.Errorf("row %s on an empty instance = %q, want attention", key, got)
 		}
@@ -228,7 +259,7 @@ func TestReadiness_ADownSourceIsUnknownNotAWholeScreen500(t *testing.T) {
 	// operator loses every other answer for no reason, and an outage in a
 	// service they were not asking about looks like a broken page.
 	f := healthy(t)
-	f["/v1/tenants/me/idp-providers"] = stubResp{500, `{"error":"boom"}`}
+	f["/api/v1/tenants/me/idp-providers"] = stubResp{500, `{"error":"boom"}`}
 	dto := build(t, f)
 
 	if got := rowByKey(t, dto, "signIn").Status; got != StatusUnknown {
@@ -267,16 +298,18 @@ func TestReadiness_PartialIsFalseWhenEverythingAnswered(t *testing.T) {
 }
 
 func TestReadiness_NextActionNamesTheFirstThingToDo(t *testing.T) {
-	// The screen's whole job is to say what to do next. On an empty instance
-	// that is creating an organisation, not "six checks failed".
+	// The screen's whole job is to say what to do next. The organisation row
+	// is unknown now (gRPC-only source) and unknown is not actionable, so the
+	// first ACTIONABLE row on an otherwise-empty instance is the missing
+	// administrator.
 	f := healthy(t)
-	f["/api/v1/tenancy/tenants/current/hierarchy"] = stubResp{200, `{"is_parent":false,"children":[]}`}
+	f["/api/v1/admin/tenant-members"] = stubResp{200, `{"items":[]}`}
 	dto := build(t, f)
 	if strings.TrimSpace(dto.NextAction) == "" {
 		t.Fatal("an instance with work to do must name a next action")
 	}
-	if !strings.Contains(strings.ToLower(dto.NextAction), "organisation") {
-		t.Errorf("next action = %q, want the organisation row (the first blocker)", dto.NextAction)
+	if !strings.Contains(strings.ToLower(dto.NextAction), "administrator") {
+		t.Errorf("next action = %q, want the administrator row (the first actionable blocker)", dto.NextAction)
 	}
 }
 
@@ -294,10 +327,10 @@ func TestReadiness_NextActionIsEmptyWhenNothingNeedsAttention(t *testing.T) {
 func TestReadiness_CountsRideOnTheRowsThatHaveThem(t *testing.T) {
 	dto := build(t, healthy(t))
 	// Count is a POINTER so a row that counts nothing omits the key entirely
-	// and a zero always means zero.
-	content := rowByKey(t, dto, "content").Count
-	if content == nil || *content != 24 {
-		t.Errorf("content count = %v, want 24 atoms from the hierarchy projection", content)
+	// and a zero always means zero. content's source (the hierarchy) is
+	// gRPC-only, so its row is unknown and carries no count at all.
+	if content := rowByKey(t, dto, "content").Count; content != nil {
+		t.Errorf("content count = %v, want omitted (hierarchy source is gRPC-only)", content)
 	}
 	admins := rowByKey(t, dto, "administrators").Count
 	if admins == nil || *admins != 1 {

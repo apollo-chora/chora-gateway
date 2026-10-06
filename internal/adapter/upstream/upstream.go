@@ -57,6 +57,11 @@ type Client interface {
 	// entity, NOT an AI agent — distinction per memory feedback_companion_vs_agent.
 	GetCompanion(ctx context.Context, tenantID, gcid string) (any, error)
 
+	// GetStreak fetches the learner's current daily streak from
+	// chora-consumption (GET /v1/me/streak). Backs the GraphQL `myStreak`
+	// query, a live Daily Dose read.
+	GetStreak(ctx context.Context, tenantID, gcid string) (any, error)
+
 	// GetFeed fetches the learner's social feed from chora-sharing.
 	GetFeed(ctx context.Context, tenantID, gcid string) (any, error)
 
@@ -144,8 +149,27 @@ func (f *FakeUpstream) GetCompanion(_ context.Context, tenantID, gcid string) (a
 		"gcid":         gcid,
 		"level":        4,
 		"mood":         "curious",
-		"_note":        "Companion = RPG companion (domain entity), distinct from the AI agent powering it.",
-		"_stub":        true,
+		// Parity with the real callee (chora-consumption /companion/me
+		// toCompanionMVPResp carries created_at + updated_at); the SPA's
+		// myFamiliar query reads both.
+		"created_at": "2026-04-01T08:00:00Z",
+		"updated_at": "2026-05-01T08:00:00Z",
+		"_note":      "Companion = RPG companion (domain entity), distinct from the AI agent powering it.",
+		"_stub":      true,
+	}, nil
+}
+
+// GetStreak returns a deterministic placeholder streak, mirroring the
+// chora-consumption GET /v1/me/streak wire shape (streakResp).
+func (f *FakeUpstream) GetStreak(_ context.Context, _, gcid string) (any, error) {
+	if f.shouldFail("GetStreak") {
+		return nil, fmt.Errorf("%w: chora-consumption stub failure (streak)", ErrUpstream)
+	}
+	return map[string]any{
+		"learner_gcid":     gcid,
+		"count":            5,
+		"last_activity_at": "2026-05-07T08:00:00Z",
+		"_stub":            true,
 	}, nil
 }
 

@@ -241,12 +241,12 @@ func TestGetMyTenant_NoTenantInAuth_400(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// CreateCourse — composite: chora-creation:/atoms + chora-delivery:/courses
+// CreateCourse — composite: chora-creation:/api/atoms + chora-delivery:/courses
 // -----------------------------------------------------------------------------
 
 func TestCreateCourse_Composite_AllOK(t *testing.T) {
 	creation := newStubUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/atoms" {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/atoms" {
 			t.Errorf("creation: method=%s path=%s", r.Method, r.URL.Path)
 		}
 		_, _ = w.Write([]byte(`{"atom_id":"atom-root-001"}`))

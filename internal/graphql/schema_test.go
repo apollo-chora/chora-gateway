@@ -56,6 +56,7 @@ func TestSchema_Execute_AllFourSubschemaRoots(t *testing.T) {
 	cases := []struct{ name, query string }{
 		{"engagement.myPaths", `{ myPaths { id } }`},
 		{"engagement.dailyDose", `{ dailyDose { id atomIds } }`},
+		{"engagement.myStreak", `{ myStreak { currentDays lastActivityAt } }`},
 		{"engagement.discoveryFeed", `{ discoveryFeed { id } }`},
 		{"gamification.myWallet", `{ myWallet { gcid xp } }`},
 		{"gamification.myBadges", `{ myBadges { id } }`},
@@ -245,6 +246,9 @@ func (errorUpstream) GetRecentAtoms(_ context.Context, _, _ string) (any, error)
 	return nil, upstreamErr()
 }
 func (errorUpstream) GetCompanion(_ context.Context, _, _ string) (any, error) {
+	return nil, upstreamErr()
+}
+func (errorUpstream) GetStreak(_ context.Context, _, _ string) (any, error) {
 	return nil, upstreamErr()
 }
 func (errorUpstream) GetFeed(_ context.Context, _, _ string) (any, error) {

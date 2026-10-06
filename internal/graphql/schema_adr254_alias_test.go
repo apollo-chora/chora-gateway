@@ -30,3 +30,27 @@ func TestSchema_Execute_MyFamiliarAlias_ADR254(t *testing.T) {
 		})
 	}
 }
+
+// TestSchema_Execute_MyFamiliarPayloadCarriesTheSPAFields pins the shape the
+// live SPA call reads. chora-web's familiar.service.ts mapFamiliarProfile
+// copies gql.gcid / gql.name / gql.createdAt / gql.updatedAt; the pre-fix
+// alias payload omitted all four, so the Familiar profile rendered with
+// undefined identity + timestamps.
+func TestSchema_Execute_MyFamiliarPayloadCarriesTheSPAFields(t *testing.T) {
+	s := newTestSchema(t)
+	resp := s.Execute(context.Background(), bffgraphql.Request{
+		Query: `{ myFamiliar { id gcid name createdAt updatedAt } }`,
+	})
+	if len(resp.Errors) > 0 {
+		t.Fatalf("unexpected errors: %v", resp.Errors)
+	}
+	m, ok := resp.Data["myFamiliar"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map myFamiliar, got %T", resp.Data["myFamiliar"])
+	}
+	for _, k := range []string{"gcid", "name", "createdAt", "updatedAt"} {
+		if v, ok := m[k]; !ok || v == nil || v == "" {
+			t.Errorf("myFamiliar.%s missing or empty: %v", k, m[k])
+		}
+	}
+}

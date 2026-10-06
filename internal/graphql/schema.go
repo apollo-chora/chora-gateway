@@ -149,6 +149,12 @@ func (s *Schema) Execute(ctx context.Context, req Request) Response {
 			return Response{Errors: []ErrorItem{{Message: err.Error(), Path: []string{root}}}}
 		}
 		data[root] = dose
+	case "myStreak":
+		streak, err := s.Engagement.MyStreak(ctx)
+		if err != nil {
+			return Response{Errors: []ErrorItem{{Message: err.Error(), Path: []string{root}}}}
+		}
+		data[root] = streak
 	case "discoveryFeed", "discovery":
 		seed, _ := req.Variables["seedAtomId"].(string)
 		depth := 2

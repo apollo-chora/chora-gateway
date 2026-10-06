@@ -7,8 +7,8 @@
 //	GetLearningPath → chora-consumption GET /api/learning-paths
 //	GetRecentAtoms  → chora-creation     GET /api/atoms?status=published
 //	GetCompanion     → chora-consumption GET /companion/me
-//	GetFeed         → chora-sharing      GET /v1/feed
-//	GetTenant       → chora-tenancy      GET /tenants/{id}
+//	GetFeed         → chora-sharing      GET /v1/feed/shared-atoms
+//	GetTenant       → chora-tenancy      GET /api/tenants/{id}
 //	GetGovernance   → chora-governance   GET /governance/{tenant_id}
 //	GetAuditEvents  → chora-observability GET /events?tenant_id=X
 //	GetCourses      → chora-delivery     GET /courses
@@ -44,7 +44,7 @@ import (
 func fixture(srvURL string, method string) *upstream.HTTPUpstream {
 	cfg := upstream.HTTPConfig{}
 	switch method {
-	case "GetLearningPath", "GetCompanion":
+	case "GetLearningPath", "GetCompanion", "GetStreak":
 		cfg.ConsumptionURL = srvURL
 	case "GetRecentAtoms":
 		cfg.CreationURL = srvURL
@@ -173,6 +173,26 @@ func TestHTTPUpstream_GetCompanion(t *testing.T) {
 	}
 }
 
+func TestHTTPUpstream_GetStreak(t *testing.T) {
+	t.Parallel()
+	cap := &captured{}
+	srv := httptest.NewServer(captureHandler(t, cap, `{"learner_gcid":"gcid-1","count":5,"last_activity_at":"2026-05-07T08:00:00Z"}`))
+	defer srv.Close()
+
+	h := fixture(srv.URL, "GetStreak")
+	res, err := h.GetStreak(withAuthCtx(context.Background()), "tenant-a", "gcid-1")
+	if err != nil {
+		t.Fatalf("GetStreak: %v", err)
+	}
+	if cap.path != "/v1/me/streak" {
+		t.Errorf("path = %q; want /v1/me/streak", cap.path)
+	}
+	body, _ := res.(map[string]any)
+	if body["count"] != float64(5) {
+		t.Errorf("body.count = %v; want 5", body["count"])
+	}
+}
+
 func TestHTTPUpstream_GetFeed(t *testing.T) {
 	t.Parallel()
 	cap := &captured{}
@@ -184,8 +204,8 @@ func TestHTTPUpstream_GetFeed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetFeed: %v", err)
 	}
-	if cap.path != "/v1/feed" {
-		t.Errorf("path = %q; want /v1/feed", cap.path)
+	if cap.path != "/v1/feed/shared-atoms" {
+		t.Errorf("path = %q; want /v1/feed/shared-atoms", cap.path)
 	}
 }
 
@@ -200,8 +220,8 @@ func TestHTTPUpstream_GetTenant_PathContainsTenantID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTenant: %v", err)
 	}
-	if cap.path != "/tenants/tenant-a" {
-		t.Errorf("path = %q; want /tenants/tenant-a", cap.path)
+	if cap.path != "/api/tenants/tenant-a" {
+		t.Errorf("path = %q; want /api/tenants/tenant-a", cap.path)
 	}
 	body, _ := res.(map[string]any)
 	if body["name"] != "Acme" {

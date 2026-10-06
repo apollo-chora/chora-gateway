@@ -40,14 +40,25 @@ func (r *CompanionResolver) MyCompanion(ctx context.Context) (any, error) {
 	// Project upstream's loose JSON into the federation-friendly shape.
 	// CRITICAL: never copy fields that begin with `_ai_` or `model_` —
 	// those would leak AI agent details, which the SDL forbids.
+	//
+	// gcid / name / createdAt / updatedAt are carried through because the live
+	// SPA query (chora-web core/graphql/queries.ts QUERY_MY_FAMILIAR, mapped in
+	// features/choraverse/services/familiar.service.ts mapFamiliarProfile)
+	// reads them; the pre-fix shape omitted all four, so the Familiar profile
+	// rendered with undefined identity + timestamps. `ownerGcid` is the
+	// historical key kept for existing consumers.
 	out := map[string]any{
 		"id":           m["companion_id"],
+		"gcid":         gcid,
+		"name":         m["name"],
 		"ownerGcid":    gcid,
 		"species":      derefSpecies(m),
 		"level":        m["level"],
 		"mood":         derefMood(m),
 		"bondedAt":     "2026-04-01T08:00:00Z",
 		"equippedSkin": nil,
+		"createdAt":    m["created_at"],
+		"updatedAt":    m["updated_at"],
 	}
 	return out, nil
 }

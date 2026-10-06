@@ -565,12 +565,17 @@ func (a *Aggregator) DeleteMyIdpProvider(ctx context.Context, auth AuthCtx, prov
 	}), nil
 }
 
-// CreateCourse — POST /api/courses — composite: chora-creation:/atoms (root
-// atom) + chora-delivery:/courses (course skeleton). Sequential: if creation
-// fails the delivery call is skipped and a 502 returned.
+// CreateCourse — POST /api/courses — composite: chora-creation:/api/atoms
+// (root atom) + chora-delivery:/courses (course skeleton). Sequential: if
+// creation fails the delivery call is skipped and a 502 returned.
+//
+// chora-creation mounts the atom collection at /api/atoms (its legacy
+// AtomHandler mux — internal/adapter/http/handler.go:479), NOT /atoms.
+// Mirrors the GetAtom / DeleteAtom / PatchAtom / AIAssist fan-outs in this
+// file, which all target /api/atoms.
 func (a *Aggregator) CreateCourse(ctx context.Context, auth AuthCtx, body []byte) (Response, error) {
 	return a.withBudget(ctx, func(c context.Context) Response {
-		atomCR := a.call(c, http.MethodPost, a.cfg.CreationURL+"/atoms", body, auth)
+		atomCR := a.call(c, http.MethodPost, a.cfg.CreationURL+"/api/atoms", body, auth)
 		atomResp := classify(atomCR)
 		if atomResp.Status >= 400 {
 			return atomResp

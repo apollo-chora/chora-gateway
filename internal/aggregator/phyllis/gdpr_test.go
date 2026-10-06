@@ -4,7 +4,7 @@
 //
 //	GET  /api/me/consents          → chora-identity:/me/consents (list + status)
 //	POST /api/me/consents/grant    → chora-identity:/me/consents (per-purpose toggle)
-//	POST /api/me/data-export       → chora-identity:/me/portability/export (Art.15)
+//	POST /api/me/data-export       → chora-identity:/api/users/{gcid}/portability/export (Art.15)
 //
 // GDPR Art. 15/20 + IMDA D4 transparency. Account closure (Art. 17) moved to
 // the canonical closure saga me-route POST /api/v1/me/account/close (CHO-1719);
@@ -135,13 +135,13 @@ func TestGrantConsent_BadRequest(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// RequestDataExport — POST chora-identity:/me/portability/export
+// RequestDataExport — POST chora-identity:/api/users/{gcid}/portability/export
 // -----------------------------------------------------------------------------
 
 func TestRequestDataExport_HappyPath(t *testing.T) {
 	identity := newStubUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/me/portability/export" {
-			t.Errorf("path = %s; want /me/portability/export", r.URL.Path)
+		if r.URL.Path != "/api/users/gcid-export/portability/export" {
+			t.Errorf("path = %s; want /api/users/gcid-export/portability/export", r.URL.Path)
 		}
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %s; want POST", r.Method)
@@ -152,12 +152,25 @@ func TestRequestDataExport_HappyPath(t *testing.T) {
 	})
 
 	a := phyllis.New(phyllis.Config{IdentityURL: identity.URL, PerCallTimeout: 1 * time.Second}, nil)
-	res, _ := a.RequestDataExport(context.Background(), phyllis.AuthCtx{Bearer: "phyllis"}, []byte(`{"format":"portable_json"}`))
+	res, _ := a.RequestDataExport(context.Background(), phyllis.AuthCtx{Bearer: "phyllis", GCID: "gcid-export"}, []byte(`{"format":"portable_json"}`))
 	if res.Status != http.StatusAccepted {
 		t.Errorf("status = %d; want 202", res.Status)
 	}
 	if !strings.Contains(string(res.Body), "01900-export") {
 		t.Errorf("body did not pass-through export_id: %s", string(res.Body))
+	}
+}
+
+// A path that embeds the GCID cannot be built without one; the aggregator
+// must refuse rather than fan out to /api/users//portability/export.
+func TestRequestDataExport_MissingGCIDIsRejected(t *testing.T) {
+	identity := newStubUpstream(t, func(http.ResponseWriter, *http.Request) {
+		t.Error("identity must NOT be called without a resolved GCID")
+	})
+	a := phyllis.New(phyllis.Config{IdentityURL: identity.URL, PerCallTimeout: 1 * time.Second}, nil)
+	res, _ := a.RequestDataExport(context.Background(), phyllis.AuthCtx{Bearer: "phyllis"}, nil)
+	if res.Status != http.StatusBadRequest {
+		t.Errorf("status = %d; want 400", res.Status)
 	}
 }
 

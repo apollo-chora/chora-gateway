@@ -14,6 +14,7 @@ package phyllis
 import (
 	"context"
 	"net/http"
+	"net/url"
 )
 
 // GetConsents — GET /api/me/consents — chora-identity:/me/consents.
@@ -40,13 +41,23 @@ func (a *Aggregator) GrantConsent(ctx context.Context, auth AuthCtx, body []byte
 	}), nil
 }
 
-// RequestDataExport — POST /api/me/data-export — chora-identity:/me/portability/export.
-// GDPR Art. 15 (Right of Access) + Art. 20 (Portability). Identity creates a
-// DSAR job and emits chora.identity.dsar.requested.v1; the closure orchestrator
-// aggregates per-domain exports into a GCS signed-URL email link with 7-day
-// expiry. SLA: ≤30 days (GDPR Art. 12(3)).
+// RequestDataExport — POST /api/me/data-export — chora-identity
+// POST /api/users/{gcid}/portability/export.
+// GDPR Art. 15 (Right of Access) + Art. 20 (Portability).
+//
+// chora-identity serves the portability export at
+// POST /api/users/{gcid}/portability/export (internal/adapter/http/handler.go:201),
+// NOT /me/portability/export — the latter is a domain-package doc reference
+// (internal/domain/portability/export.go:6) with no HTTP route, so the old
+// path 404'd. Identity resolves the GCID from the path, so the caller's GCID
+// is embedded here. Identity appends a PortableSnapshot row (skeleton mode).
 func (a *Aggregator) RequestDataExport(ctx context.Context, auth AuthCtx, body []byte) (Response, error) {
+	if auth.GCID == "" {
+		return errResp(http.StatusBadRequest, "GATEWAY_GCID_NOT_RESOLVED",
+			"gcid missing from auth context"), nil
+	}
 	return a.withBudget(ctx, func(c context.Context) Response {
-		return classify(a.call(c, http.MethodPost, a.cfg.IdentityURL+"/me/portability/export", body, auth))
+		u := a.cfg.IdentityURL + "/api/users/" + url.PathEscape(auth.GCID) + "/portability/export"
+		return classify(a.call(c, http.MethodPost, u, body, auth))
 	}), nil
 }

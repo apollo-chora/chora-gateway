@@ -116,3 +116,68 @@ func TestEngagementResolver_NewWithNilCtxIdentity_DoesNotPanic(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 }
+
+// myStreak backs the live SPA Daily Dose read; it must resolve (not return
+// GRAPHQL_UNKNOWN_FIELD) and expose the FE's camelCase fields from the
+// chora-consumption /v1/me/streak wire shape.
+func TestEngagementResolver_MyStreak_MapsConsumptionWire(t *testing.T) {
+	r := resolvers.NewEngagementResolver(upstream.NewFakeUpstream(), staticIdentity("t", "g"))
+	v, err := r.MyStreak(context.Background())
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", v)
+	}
+	if m["currentDays"] != 5 {
+		t.Errorf("currentDays = %v; want 5 (count)", m["currentDays"])
+	}
+	if m["lastActivityAt"] != "2026-05-07T08:00:00Z" {
+		t.Errorf("lastActivityAt = %v; want the last_activity_at value", m["lastActivityAt"])
+	}
+}
+
+func TestEngagementResolver_MyStreak_PropagatesUpstreamError(t *testing.T) {
+	fake := upstream.NewFakeUpstream()
+	fake.FailMethods["GetStreak"] = true
+	r := resolvers.NewEngagementResolver(fake, staticIdentity("t", "g"))
+	if _, err := r.MyStreak(context.Background()); !errors.Is(err, upstream.ErrUpstream) {
+		t.Fatalf("expected ErrUpstream, got %v", err)
+	}
+}
+
+// numericField handles both the float64 JSON decode and the int FakeUpstream
+// returns; a json-decoded count must map too.
+func TestEngagementResolver_MyStreak_MapsJSONDecodedCount(t *testing.T) {
+	fake := &fakeStreak{Client: upstream.NewFakeUpstream(), payload: map[string]any{
+		"count":            float64(9),
+		"last_activity_at": "2026-03-12T10:00:00Z",
+		"longest_streak":   float64(21),
+		"status":           "active",
+	}}
+	r := resolvers.NewEngagementResolver(fake, staticIdentity("t", "g"))
+	v, err := r.MyStreak(context.Background())
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	m := v.(map[string]any)
+	if m["currentDays"] != 9 {
+		t.Errorf("currentDays = %v; want 9", m["currentDays"])
+	}
+	if m["longestStreak"] != 21 {
+		t.Errorf("longestStreak = %v; want 21 (forwarded when the callee adds it)", m["longestStreak"])
+	}
+	if m["status"] != "active" {
+		t.Errorf("status = %v; want active (forwarded when the callee adds it)", m["status"])
+	}
+}
+
+type fakeStreak struct {
+	upstream.Client
+	payload map[string]any
+}
+
+func (f *fakeStreak) GetStreak(_ context.Context, _, _ string) (any, error) {
+	return f.payload, nil
+}

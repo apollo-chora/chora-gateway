@@ -216,6 +216,9 @@ func (h *HTTPUpstream) call(ctx context.Context, spanName, method, urlStr string
 	if auth.TenantID != "" {
 		req.Header.Set("X-Tenant-Id", auth.TenantID)
 	}
+	if auth.GCID != "" {
+		req.Header.Set("gcid", auth.GCID)
+	}
 	mesh := servicemesh.MarshalToHeaders(servicemesh.MeshClaims{
 		GCID:        auth.GCID,
 		TenantID:    auth.TenantID,

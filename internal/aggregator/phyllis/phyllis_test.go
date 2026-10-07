@@ -770,7 +770,21 @@ func TestAuthCtx_HasAuthorRole(t *testing.T) {
 		{[]string{"learner"}, false},
 		{[]string{}, false},
 		{nil, false},
-		{[]string{"admin"}, false}, // admin is NOT an author role for this gate
+		// CHO-2254 gated the authoring surface to author|instructor, which left
+		// the tenant's own admin able to CREATE a question (the accept route is
+		// ungated) but not READ it back — the atom editor rendered empty. The
+		// tenant-administrative roles are admitted alongside author/instructor,
+		// matching chora-creation's hasAuthorRole.
+		{[]string{"admin"}, true},
+		{[]string{"ADMIN"}, true},
+		{[]string{"owner"}, true},
+		{[]string{"tenant_admin"}, true},
+		// Still rejected: the gate keeps the answer key away from everyone who
+		// is not the tenant's author, instructor, or administrator.
+		{[]string{"auditor"}, false},
+		{[]string{"proctor"}, false},
+		{[]string{"support_agent"}, false},
+		{[]string{"learner", "auditor"}, false},
 	}
 	for i, c := range cases {
 		got := phyllis.AuthCtx{Roles: c.roles}.HasAuthorRole()

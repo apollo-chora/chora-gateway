@@ -196,10 +196,20 @@ type AuthCtx struct {
 // HasAuthorRole reports whether the resolved auth context carries an
 // authoring/instructor role on the active tenant. Used to gate the WS-0b
 // A16 author-mode fields (e.g. correct_option_id on question_payload).
+//
+// The tenant-administrative roles (admin / owner / tenant_admin) are admitted
+// alongside author / instructor. chora-creation gates its ENTIRE /questions
+// authoring subtree on the same predicate, so an admin excluded here can mint a
+// question through the (ungated) accept route and then 403 on reading it back —
+// the atom editor renders empty. Keep this list and chora-creation's
+// hasAuthorRole in lockstep: they are the two doors to one secret.
+//
+// Matching is case-insensitive so a canonical token ("AUTHOR", "ADMIN") and a
+// lowercase mesh value both land.
 func (a AuthCtx) HasAuthorRole() bool {
 	for _, r := range a.Roles {
-		switch r {
-		case "author", "instructor", "Author", "Instructor", "AUTHOR", "INSTRUCTOR":
+		switch strings.ToLower(strings.TrimSpace(r)) {
+		case "author", "instructor", "admin", "owner", "tenant_admin":
 			return true
 		}
 	}

@@ -11,6 +11,7 @@
 package httpadapter_test
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,9 +24,11 @@ import (
 
 type gwRouteRecorder struct {
 	*httptest.Server
-	lastPath   string
-	lastMethod string
-	lastQuery  string
+	lastPath       string
+	lastMethod     string
+	lastQuery      string
+	lastIdempotKey string
+	lastBody       string
 }
 
 func newGwRouteRecorder(t *testing.T, status int, body string) *gwRouteRecorder {
@@ -35,6 +38,9 @@ func newGwRouteRecorder(t *testing.T, status int, body string) *gwRouteRecorder 
 		r.lastPath = req.URL.Path
 		r.lastMethod = req.Method
 		r.lastQuery = req.URL.RawQuery
+		r.lastIdempotKey = req.Header.Get("Idempotency-Key")
+		b, _ := io.ReadAll(req.Body)
+		r.lastBody = string(b)
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
 	}))
@@ -99,6 +105,51 @@ func TestGwRoutes_ManaWalletAndTopup(t *testing.T) {
 	w = doGwProxyReq(t, mux, http.MethodPost, "/api/v1/me/mana/topup", `{}`)
 	if w.Code != http.StatusGone {
 		t.Fatalf("POST /api/v1/me/mana/topup → %d; want 410 (retired)", w.Code)
+	}
+}
+
+func TestGwRoutes_ManaDemoGrant(t *testing.T) {
+	rec := newGwRouteRecorder(t, http.StatusOK,
+		`{"granted_units":100000,"balance_units":100000,"replayed":false,"reason":"demo_grant"}`)
+	mux := newGwRouteMux(t, rec)
+
+	// Demo grant POST → proxied 200 to chora-identity, same path.
+	w := doGwProxyReq(t, mux, http.MethodPost, "/api/v1/me/mana/demo-grant", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /api/v1/me/mana/demo-grant → %d; want 200", w.Code)
+	}
+	if rec.lastPath != "/api/v1/me/mana/demo-grant" {
+		t.Fatalf("downstream path = %q; want /api/v1/me/mana/demo-grant", rec.lastPath)
+	}
+	if rec.lastMethod != http.MethodPost {
+		t.Fatalf("downstream method = %q; want POST", rec.lastMethod)
+	}
+
+	// The amount is server-configured: the gateway must forward NO body, so a
+	// client cannot smuggle in an amount.
+	if rec.lastBody != "" {
+		t.Fatalf("downstream body = %q; want empty (amount is server-configured)", rec.lastBody)
+	}
+
+	// Idempotency-Key is REQUIRED by the contract → forwarded verbatim.
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/me/mana/demo-grant", nil)
+	r.Header.Set("Authorization", "Bearer testtoken")
+	r.Header.Set("X-Tenant-Id", "tenant-001")
+	r.Header.Set("Idempotency-Key", "demo-key-001")
+	r = r.WithContext(httpadapter.InjectMeshClaimsForTest(r.Context(), "gcid-001", "tenant-001"))
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /api/v1/me/mana/demo-grant (with key) → %d; want 200", w.Code)
+	}
+	if rec.lastIdempotKey != "demo-key-001" {
+		t.Fatalf("forwarded Idempotency-Key = %q; want demo-key-001", rec.lastIdempotKey)
+	}
+
+	// Non-POST → 405.
+	w = doGwProxyReq(t, mux, http.MethodGet, "/api/v1/me/mana/demo-grant", "")
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /api/v1/me/mana/demo-grant → %d; want 405", w.Code)
 	}
 }
 

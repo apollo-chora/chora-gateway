@@ -19,6 +19,7 @@
 //	GET  /api/notifications                → chora-notifications GET /api/notifications
 //	GET  /api/v1/me/mana                   → chora-identity GET /api/v1/me/mana            (A17)
 //	POST /api/v1/me/mana/topup             → chora-identity POST /api/v1/me/mana/topup     (A17)
+//	POST /api/v1/me/mana/demo-grant       → chora-identity POST /api/v1/me/mana/demo-grant (demo only)
 //
 // Wire contract:
 //   - Bearer JWT enforced by chora-gateway's RequireChoraSessionJWT
@@ -621,6 +622,28 @@ func (a *Aggregator) GetMyMana(ctx context.Context, auth AuthCtx) (Response, err
 func (a *Aggregator) TopupMana(ctx context.Context, auth AuthCtx, body []byte) (Response, error) {
 	u := a.cfg.IdentityURL + "/api/v1/me/mana/topup"
 	return classify(a.call(ctx, http.MethodPost, u, body, auth)), nil
+}
+
+// GrantDemoMana proxies POST /api/v1/me/mana/demo-grant → chora-identity
+// POST /api/v1/me/mana/demo-grant (same path; pure pass). The demo grant is
+// a no-body operation — the credited amount is server-configured per
+// learner-economy.yaml grantDemoManaToSelf, so the gateway forwards NO body
+// rather than an empty JSON object (a `{}` would be a client-supplied
+// amount, which the contract forbids).
+//
+// The Idempotency-Key header is REQUIRED by the contract, so unlike
+// TopupMana the gateway does not rely on the downstream's fallback key
+// synthesis: auth.IdempotencyKey is stamped by the call() helper whenever
+// the FE supplied one, and a missing one is a downstream 400 that must pass
+// through verbatim rather than be masked by a gateway-generated key.
+//
+// The downstream returns the canonical ManaDemoGrantResponse (200), 400
+// (missing Idempotency-Key), 404 (demo surface not enabled in this
+// deployment) or 429 (demo quota exhausted) — all pass through verbatim so
+// the FE can distinguish "demo is off here" from "you have no budget left".
+func (a *Aggregator) GrantDemoMana(ctx context.Context, auth AuthCtx) (Response, error) {
+	u := a.cfg.IdentityURL + "/api/v1/me/mana/demo-grant"
+	return classify(a.call(ctx, http.MethodPost, u, nil, auth)), nil
 }
 
 // ListMyManaLedger proxies GET /api/v1/me/mana/ledger → chora-identity GET

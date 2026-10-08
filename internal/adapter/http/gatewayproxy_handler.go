@@ -20,6 +20,7 @@
 //	GET  /api/notifications                → chora-notifications /api/notifications
 //	GET  /api/v1/me/mana                   → chora-identity  /api/v1/me/mana          (A17)
 //	POST /api/v1/me/mana/topup             → chora-identity  /api/v1/me/mana/topup    (A17)
+//	POST /api/v1/me/mana/demo-grant       → chora-identity  /api/v1/me/mana/demo-grant (demo only)
 //
 // Composition note: these /api/* paths are NOT in the gateway's legacy
 // route table (internal/adapter/inmem/route_repository.go). Rather than
@@ -256,6 +257,9 @@ func NewGatewayProxyMux(agg *gatewayproxy.Aggregator) http.Handler {
 	// A17 — mana wallet + top-up exact-path routes on chora-identity.
 	mux.HandleFunc("/api/v1/me/mana", h.handleMeMana)
 	mux.HandleFunc("/api/v1/me/mana/topup", h.handleMeManaTopup)
+	// Demo-only free mana mint → chora-identity. Separate exact path from the
+	// retired /topup above; the JWT-gated /api/v1/me/mana prefix covers it.
+	mux.HandleFunc("/api/v1/me/mana/demo-grant", h.handleMeManaDemoGrant)
 	// CHO-1883 (2026-06-26) — A+ Wallet ledger leaf (per-row transaction list).
 	mux.HandleFunc("/api/v1/me/mana/ledger", h.handleMeManaLedger)
 	// CHO-1883 — A+ Mana Pool ledger CSV/NDJSON export (streaming download).
@@ -502,6 +506,11 @@ func matchesGatewayProxyPath(p string) bool {
 		// A17 — mana wallet + top-up. Both leaves are exact-path owned.
 		"/api/v1/me/mana",
 		"/api/v1/me/mana/topup",
+		// Demo-only mana mint (grantDemoManaToSelf). EXACT-path owned; the
+		// /api/v1/me/mana JWT-gate prefix covers it. NOT the retired
+		// /topup route — the two must stay distinct so the paid path can
+		// never silently become a free mint.
+		"/api/v1/me/mana/demo-grant",
 		// CHO-1883 (2026-06-26) — A+ Wallet ledger leaf + CSV/NDJSON export.
 		// EXACT-path owned; the /api/v1/me/mana JWT-gate prefix covers both
 		// (HasPrefix).
@@ -1586,6 +1595,23 @@ func (h *GatewayProxyHandler) handleMeEnrolments(w http.ResponseWriter, r *http.
 		return
 	}
 	resp, _ := h.agg.ListMyEnrolments(r.Context(), gatewayProxyAuthFromRequest(r), r.URL.RawQuery)
+	writeGatewayProxyResp(w, resp)
+}
+
+// handleMeManaDemoGrant — POST /api/v1/me/mana/demo-grant
+//
+// Demo-only free mana mint, proxied to chora-identity. Distinct route from
+// the retired /api/v1/me/mana/topup (which returned 410 and must stay
+// retired): this one carries no payment semantics and MUST NOT be folded
+// into the Stripe top-up path, which has to stay a single route that always
+// charges. 405 on non-POST.
+func (h *GatewayProxyHandler) handleMeManaDemoGrant(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "GATEWAY_METHOD_NOT_ALLOWED",
+			"POST only on /api/v1/me/mana/demo-grant")
+		return
+	}
+	resp, _ := h.agg.GrantDemoMana(r.Context(), gatewayProxyAuthFromRequest(r))
 	writeGatewayProxyResp(w, resp)
 }
 

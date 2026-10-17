@@ -88,12 +88,13 @@ type VerifyCredentialsRequest struct {
 	Password string `json:"password"`
 }
 
-// IdentityMembership is one (tenant, roles) membership row returned by
-// chora-identity. Mirrors ResolveTenantMembership so the mint response keeps
+// IdentityMembership is one (tenant, roles, surfaces) membership row returned
+// by chora-identity. Mirrors ResolveTenantMembership so the mint response keeps
 // the frontend's memberships[] contract intact.
 type IdentityMembership struct {
 	TenantID string   `json:"tenant_id"`
 	Roles    []string `json:"roles"`
+	Surfaces []string `json:"surfaces"`
 }
 
 // VerifyCredentialsResponse is the authoritative identity returned by

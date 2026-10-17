@@ -320,6 +320,70 @@ func TestMint_PlatformOperatorMembership_WidensSurfaces(t *testing.T) {
 	}
 }
 
+// chora-identity emits surfaces[] per membership; the mint response must carry
+// them through verbatim so the frontend's surface-access gate stops falling
+// back to the A+ rail.
+func TestMint_CarriesMembershipSurfaces(t *testing.T) {
+	f := newMintFixtureWith(t, func(cfg *httpadapter.MintHandlerConfig) {
+		cfg.Credentials = &stubCredentialsVerifier{resp: &clients.VerifyCredentialsResponse{
+			GCID:              "01970000-0000-7000-8000-0000000000aa",
+			Email:             mintTestEmail,
+			ActiveTenantID:    mintDefaultTenantID,
+			ActiveTenantRoles: []string{"learner"},
+			Memberships: []clients.IdentityMembership{
+				{TenantID: mintDefaultTenantID, Roles: []string{"learner"}, Surfaces: []string{"rplus"}},
+				{TenantID: mintOtherTenantID, Roles: []string{"admin"}, Surfaces: []string{"aplus", "hplus"}},
+			},
+		}}
+	})
+	w := f.doRequest(t, map[string]any{"username": mintTestUser, "password": mintTestPasswd})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	body := decodeMintBody(t, w)
+	ms, _ := body["memberships"].([]any)
+	if len(ms) != 2 {
+		t.Fatalf("memberships = %v", body["memberships"])
+	}
+	for i, want := range [][]string{{"rplus"}, {"aplus", "hplus"}} {
+		m, _ := ms[i].(map[string]any)
+		got, _ := m["surfaces"].([]any)
+		if len(got) != len(want) {
+			t.Errorf("memberships[%d].surfaces = %v want %v", i, m["surfaces"], want)
+			continue
+		}
+		for j, s := range want {
+			if got[j] != s {
+				t.Errorf("memberships[%d].surfaces[%d] = %v want %v", i, j, got[j], s)
+			}
+		}
+	}
+}
+
+// Absent surfaces on the verify-credentials response must stay absent (null)
+// in the mint response — unchanged behaviour for identities that do not emit
+// the field yet.
+func TestMint_AbsentSurfacesStayNull(t *testing.T) {
+	f := newMintFixture(t) // defaultVerifyResponse has no Surfaces
+	w := f.doRequest(t, map[string]any{"username": mintTestUser, "password": mintTestPasswd})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	body := decodeMintBody(t, w)
+	ms, _ := body["memberships"].([]any)
+	if len(ms) != 1 {
+		t.Fatalf("memberships = %v", body["memberships"])
+	}
+	m, _ := ms[0].(map[string]any)
+	raw, present := m["surfaces"]
+	if !present {
+		t.Fatalf("surfaces key missing from membership: %v", m)
+	}
+	if raw != nil {
+		t.Errorf("surfaces = %v want null", raw)
+	}
+}
+
 // --- failure paths -----------------------------------------------------------
 
 func TestMint_401_InvalidCredentials(t *testing.T) {

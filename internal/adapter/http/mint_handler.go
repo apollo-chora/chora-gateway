@@ -258,6 +258,7 @@ func (h *MintHandler) Mint(w http.ResponseWriter, r *http.Request) {
 		memberships = append(memberships, clients.ResolveTenantMembership{
 			TenantID: m.TenantID,
 			Roles:    append([]string(nil), m.Roles...),
+			Surfaces: append([]string(nil), m.Surfaces...),
 		})
 	}
 

@@ -36,9 +36,10 @@ type RefreshRecord struct {
 	Revoked   bool      `json:"revoked"`
 }
 
-// IsExpired reports whether the record has passed its expiry at now.
+// IsExpired reports whether the record has reached its expiry at now
+// (inclusive — a token is expired at exactly ExpiresAt).
 func (r *RefreshRecord) IsExpired(now time.Time) bool {
-	return now.After(r.ExpiresAt)
+	return !now.Before(r.ExpiresAt)
 }
 
 // RefreshStore persists refresh records. Adapters: inmem (skeleton);

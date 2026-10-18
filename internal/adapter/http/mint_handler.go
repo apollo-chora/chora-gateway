@@ -382,31 +382,18 @@ func (h *MintHandler) ReissueFor(ctx context.Context, gcid, email, tenantID stri
 	return h.Reissue(ctx, access, now, gcid, email, tenantID, roles, nil)
 }
 
-// RotateReissue is the refresh handler's atomic rotation: it mints a fresh
-// access JWT, persists the access session row, then consumes the presented
-// refresh token and stores its replacement in ONE locked store step. Because
-// the consume-and-replace is atomic, a failed rotation leaves the old token
-// active and retryable (no stranded session) and a concurrent exchange cannot
-// mint two live descendants.
+// RotateReissue is the refresh handler's rotation. It first consumes the
+// presented refresh token and stores its replacement in ONE atomic store step
+// (ReplaceRefresh), and only then persists the access session row. Doing the
+// consume-and-replace first means a failed rotation writes no access session
+// (nothing to clean up) and leaves the old token active and retryable — no
+// stranded session, no orphaned access row. A concurrent exchange still cannot
+// mint two live descendants, because ReplaceRefresh's consume is atomic.
 //
 // The caller has already pre-checked the presented token (GetRefresh) for a
 // clean error message; ReplaceRefresh re-checks atomically and is authoritative.
 func (h *MintHandler) RotateReissue(ctx context.Context, oldToken, gcid, email, tenantID string, roles []string) (MintResponse, error) {
 	now := h.now()
-	access, err := h.signSessionJWT(gcid, email, tenantID, roles, h.sessionTTL, now)
-	if err != nil {
-		return MintResponse{}, err
-	}
-	if err := h.sessions.Save(ctx, &session.Session{
-		Token:     access,
-		Gcid:      gcid,
-		TenantID:  tenantID,
-		Roles:     append([]string(nil), roles...),
-		IssuedAt:  now,
-		ExpiresAt: now.Add(h.sessionTTL),
-	}); err != nil {
-		return MintResponse{}, err
-	}
 	newRefresh, err := newOpaqueToken()
 	if err != nil {
 		return MintResponse{}, err
@@ -419,6 +406,20 @@ func (h *MintHandler) RotateReissue(ctx context.Context, oldToken, gcid, email, 
 		Roles:     append([]string(nil), roles...),
 		IssuedAt:  now,
 		ExpiresAt: now.Add(h.refreshTTL),
+	}); err != nil {
+		return MintResponse{}, err
+	}
+	access, err := h.signSessionJWT(gcid, email, tenantID, roles, h.sessionTTL, now)
+	if err != nil {
+		return MintResponse{}, err
+	}
+	if err := h.sessions.Save(ctx, &session.Session{
+		Token:     access,
+		Gcid:      gcid,
+		TenantID:  tenantID,
+		Roles:     append([]string(nil), roles...),
+		IssuedAt:  now,
+		ExpiresAt: now.Add(h.sessionTTL),
 	}); err != nil {
 		return MintResponse{}, err
 	}

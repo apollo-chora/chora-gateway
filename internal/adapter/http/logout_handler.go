@@ -55,7 +55,13 @@ func (h *LogoutHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	// user's local session clear on a server 4xx.
 	_ = dec.Decode(&req)
 	if token := strings.TrimSpace(req.RefreshToken); token != "" {
-		_ = h.store.RevokeRefresh(context.WithoutCancel(r.Context()), token)
+		if err := h.store.RevokeRefresh(context.WithoutCancel(r.Context()), token); err != nil {
+			// Never claim revocation succeeded when it failed: the browser
+			// would drop its credential while the server-side token stays live.
+			writeError(w, http.StatusInternalServerError, "AUTH_LOGOUT_FAILED",
+				"failed to revoke refresh token: "+sanitizeErr(err))
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": true})
 }

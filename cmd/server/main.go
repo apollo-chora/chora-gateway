@@ -76,6 +76,7 @@ func main() {
 
 	routesRepo := inmem.NewRouteRepository()
 	sessionsRepo := inmem.NewSessionRepository()
+	refreshStore := inmem.NewRefreshStore()
 
 	// Phase 6 — upstream client selector. Defaults to FakeUpstream so the
 	// rollback path is zero-regression. BFF_HTTPUPSTREAM_ENABLED=true wires
@@ -163,7 +164,7 @@ func main() {
 	// username/password pair for a Chora session JWT. Wrapped OUTSIDE the IDP
 	// JWT prefix gate because this IS the auth-establishing endpoint — clients
 	// haven't got a Chora session yet when they hit it.
-	mintHandler, mintCleanup, err := NewMintHandlerFromEnv(ctx, sessionsRepo)
+	mintHandler, mintCleanup, err := NewMintHandlerFromEnv(ctx, sessionsRepo, refreshStore)
 	if err != nil {
 		log.Fatalf("mint handler init failed: %v", err)
 	}
@@ -179,6 +180,30 @@ func main() {
 	} else {
 		log.Printf("mint handler wired — POST /api/v1/auth/session/mint live")
 	}
+
+	// Refresh endpoint (POST /api/v1/auth/session/refresh): exchanges a live
+	// refresh token for a rotated session pair. Anonymous like the mint route
+	// (the caller presents the refresh credential, not a Bearer header).
+	refreshHandler, err := httpadapter.NewRefreshHandler(httpadapter.RefreshHandlerConfig{
+		Mint:  mintHandler,
+		Store: refreshStore,
+	})
+	if err != nil {
+		log.Fatalf("refresh handler init failed: %v", err)
+	}
+	if refreshHandler == nil {
+		log.Printf("refresh handler DISABLED — POST /api/v1/auth/session/refresh will 404")
+	} else {
+		log.Printf("refresh handler wired — POST /api/v1/auth/session/refresh live")
+	}
+
+	// Logout endpoint (POST /api/v1/auth/logout): revokes the presented
+	// refresh record so sign-out ends the durable half of the session.
+	logoutHandler, err := httpadapter.NewLogoutHandler(refreshStore)
+	if err != nil {
+		log.Fatalf("logout handler init failed: %v", err)
+	}
+	log.Printf("logout handler wired — POST /api/v1/auth/logout live")
 
 	// PROD-D (m14.iter5g) — ADR-149 Companion Growth + Egg purchase BFF routes.
 	// Proxies /api/v1/me/companions/* → chora-consumption and
@@ -483,6 +508,12 @@ func main() {
 
 	innerMuxWithMint := httpadapter.WithMintRoute(innerMuxWithCompanionSuspension, mintHandler)
 
+	// Session renewal + sign-out routes. Both anonymous (like mint): the
+	// refresh caller presents the refresh token in the body, and logout is
+	// driven by the presented refresh token, not a Bearer header.
+	innerMuxWithRefresh := httpadapter.WithRefreshRoute(innerMuxWithMint, refreshHandler)
+	innerMuxWithLogout := httpadapter.WithLogoutRoute(innerMuxWithRefresh, logoutHandler)
+
 	// Phase A4 (ADR-181 D2, CHO-1718) — WebAuthn passkey BFF routes:
 	// /api/v1/auth/webauthn/{register,login}/{begin,finish} proxy the
 	// ceremonies to chora-identity's /v1/auth/passkey/* routes; login/finish
@@ -513,7 +544,7 @@ func main() {
 	} else {
 		log.Printf("webauthn handler DISABLED (SVC_IDENTITY_URL unset) — /api/v1/auth/webauthn/* will 404")
 	}
-	innerMuxWithWebAuthn := httpadapter.WithWebAuthnRoutes(innerMuxWithMint, webauthnHandler)
+	innerMuxWithWebAuthn := httpadapter.WithWebAuthnRoutes(innerMuxWithLogout, webauthnHandler)
 
 	// CHO-1719 (ADR-181 D5) — account-closure saga trigger routes:
 	// /api/v1/me/account/{close,close/cancel,closure} (self-service, identity

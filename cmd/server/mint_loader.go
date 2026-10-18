@@ -40,10 +40,16 @@ const (
 	EnvChoraSessionIssuer     = "CHORA_SESSION_ISSUER"
 	EnvChoraSessionAudience   = "CHORA_SESSION_AUDIENCE"
 	EnvChoraSessionTTLSeconds = "CHORA_SESSION_TTL_SECONDS"
+	EnvChoraRefreshTTLSeconds = "CHORA_REFRESH_TTL_SECONDS"
 	EnvIdentityURL            = "CHORA_IDENTITY_URL"
 	EnvSVCIdentityURL         = "SVC_IDENTITY_URL"
 	EnvMintDisabled           = "MINT_DISABLED"
 )
+
+// DefaultRefreshTTL is the refresh-record lifetime when
+// CHORA_REFRESH_TTL_SECONDS is unset: 7 days. Sliding — every refresh mints
+// a record with a fresh expiry.
+const DefaultRefreshTTL = 7 * 24 * time.Hour
 
 // DefaultIdentityURL is the local-stack chora-identity address.
 const DefaultIdentityURL = "http://identity:8080"
@@ -67,7 +73,7 @@ var ErrMintConfigMissing = errors.New("mint config missing required env var")
 // NewMintHandlerFromEnv constructs the mint handler entirely from env vars.
 // Returns (nil, nil) when MINT_DISABLED=true so callers can boot without the
 // route during local dev.
-func NewMintHandlerFromEnv(ctx context.Context, sessions session.Repository) (*httpadapter.MintHandler, func() error, error) {
+func NewMintHandlerFromEnv(ctx context.Context, sessions session.Repository, refreshes session.RefreshStore) (*httpadapter.MintHandler, func() error, error) {
 	noop := func() error { return nil }
 	if strings.EqualFold(strings.TrimSpace(os.Getenv(EnvMintDisabled)), "true") {
 		return nil, noop, nil
@@ -108,16 +114,18 @@ func NewMintHandlerFromEnv(ctx context.Context, sessions session.Repository) (*h
 		Credentials:   credsClient,
 		Identity:      identityClient,
 		Sessions:      sessions,
+		RefreshStore:  refreshes,
 		SessionSigner: []byte(signer),
 		SessionIssuer: sessionIssuer,
 		SessionAud:    sessionAud,
 		SessionTTL:    parseTTLSecondsOrDefault(EnvChoraSessionTTLSeconds, time.Hour),
+		RefreshTTL:    parseTTLSecondsOrDefault(EnvChoraRefreshTTLSeconds, DefaultRefreshTTL),
 	}
 	h, err := httpadapter.NewMintHandler(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
-	log.Printf("mint: wired (identity=%s, ttl=%s)", identityURL, cfg.SessionTTL)
+	log.Printf("mint: wired (identity=%s, ttl=%s, refreshTTL=%s)", identityURL, cfg.SessionTTL, cfg.RefreshTTL)
 	return h, noop, nil
 }
 

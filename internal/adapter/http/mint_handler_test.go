@@ -107,6 +107,7 @@ func newMintFixtureWith(t *testing.T, mutate func(*httpadapter.MintHandlerConfig
 		Credentials:   creds,
 		Identity:      identity,
 		Sessions:      inmem.NewSessionRepository(),
+		RefreshStore:  inmem.NewRefreshStore(),
 		SessionSigner: []byte(mintTestSigner),
 		SessionIssuer: mintTestIssuer,
 		SessionAud:    mintTestAud,

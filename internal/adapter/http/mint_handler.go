@@ -33,6 +33,7 @@ package httpadapter
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -85,10 +86,12 @@ type MintHandler struct {
 	creds         CredentialsVerifier
 	identity      IdentityResolver // WebAuthn login/finish only
 	sessions      session.Repository
+	refreshStore  session.RefreshStore
 	sessionSigner []byte // HS256 signing key
 	sessionIssuer string
 	sessionAud    string
 	sessionTTL    time.Duration
+	refreshTTL    time.Duration
 	now           func() time.Time
 	correlationFn func() string
 }
@@ -105,10 +108,17 @@ type MintHandlerConfig struct {
 	// leaves /bff/* and /api/v1/graphql upstream calls carrying no
 	// tenant/gcid.
 	Sessions      session.Repository
+	// RefreshStore persists the durable refresh record paired with every
+	// minted access JWT. REQUIRED: without it there is no renewal path and
+	// every session silently dies at the access-token expiry.
+	RefreshStore  session.RefreshStore
 	SessionSigner []byte // HS256 secret bytes — must be ≥32 bytes
 	SessionIssuer string // e.g. "https://api.chora.site"
 	SessionAud    string // e.g. "chora-local"
 	SessionTTL    time.Duration
+	// RefreshTTL is the refresh-record lifetime. Defaults to 7 days when
+	// <= 0. Sliding: every refresh mints a record with a fresh expiry.
+	RefreshTTL    time.Duration
 	Now           func() time.Time
 	CorrelationFn func() string
 }
@@ -134,8 +144,14 @@ func NewMintHandler(cfg MintHandlerConfig) (*MintHandler, error) {
 	if cfg.SessionTTL <= 0 {
 		cfg.SessionTTL = time.Hour
 	}
+	if cfg.RefreshTTL <= 0 {
+		cfg.RefreshTTL = 7 * 24 * time.Hour
+	}
 	if cfg.Sessions == nil {
 		return nil, errors.New("mint: session repository required (the BFF auth middleware resolves tenant/gcid from the persisted session)")
+	}
+	if cfg.RefreshStore == nil {
+		return nil, errors.New("mint: refresh store required (every minted session needs a durable renewal record)")
 	}
 	if cfg.Now == nil {
 		cfg.Now = func() time.Time { return time.Now().UTC() }
@@ -147,10 +163,12 @@ func NewMintHandler(cfg MintHandlerConfig) (*MintHandler, error) {
 		creds:         cfg.Credentials,
 		identity:      cfg.Identity,
 		sessions:      cfg.Sessions,
+		refreshStore:  cfg.RefreshStore,
 		sessionSigner: append([]byte(nil), cfg.SessionSigner...),
 		sessionIssuer: cfg.SessionIssuer,
 		sessionAud:    cfg.SessionAud,
 		sessionTTL:    cfg.SessionTTL,
+		refreshTTL:    cfg.RefreshTTL,
 		now:           cfg.Now,
 		correlationFn: cfg.CorrelationFn,
 	}, nil
@@ -163,13 +181,17 @@ type MintRequest struct {
 }
 
 // MintResponse matches the Angular AuthTokenResponse interface so the FE
-// auth.service.handleAuthResponse can consume it unchanged.
+// auth.service.handleAuthResponse can consume it unchanged. The refresh
+// half lets the SPA renew the session without a password (POST
+// /api/v1/auth/session/refresh) and survive reloads.
 type MintResponse struct {
-	AccessToken string                            `json:"access_token"`
-	TokenType   string                            `json:"token_type"`
-	ExpiresIn   int                               `json:"expires_in"`
-	GCID        string                            `json:"gcid"`
-	Memberships []clients.ResolveTenantMembership `json:"memberships"`
+	AccessToken      string                            `json:"access_token"`
+	TokenType        string                            `json:"token_type"`
+	ExpiresIn        int                               `json:"expires_in"`
+	RefreshToken     string                            `json:"refresh_token"`
+	RefreshExpiresIn int                               `json:"refresh_expires_in"`
+	GCID             string                            `json:"gcid"`
+	Memberships      []clients.ResolveTenantMembership `json:"memberships"`
 }
 
 // mintErrorEnvelope matches the front-end's expected
@@ -290,33 +312,141 @@ func (h *MintHandler) mintFromIdentity(w http.ResponseWriter, r *http.Request, g
 			"AUTH_SESSION_MINT_FAILED", err.Error())
 		return
 	}
-	// Persist the session under the JWT itself. The BFF's session-based auth
-	// middleware resolves tenant/gcid by looking the token up in this store, so
-	// without the save every /bff/* and /api/v1/graphql upstream call goes out
-	// with no identity and the callee answers 401.
-	if err := h.sessions.Save(r.Context(), &session.Session{
-		Token:     access,
-		Gcid:      gcid,
-		TenantID:  tenantID,
-		Roles:     append([]string(nil), activeRoles...),
-		IssuedAt:  now,
-		ExpiresAt: now.Add(h.sessionTTL),
-	}); err != nil {
+	resp, err := h.Reissue(r.Context(), access, now, gcid, email, tenantID, activeRoles, memberships)
+	if err != nil {
 		h.writeMintError(w, http.StatusInternalServerError,
 			"AUTH_SESSION_PERSIST_FAILED", err.Error())
 		return
 	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// Reissue mints a rotated session pair for an ALREADY-authorised identity:
+// persists the access-token session row (so the BFF session middleware keeps
+// resolving tenant/gcid), issues a durable refresh record, and returns the
+// wire response. Shared by the mint handler (password / webAuthn paths) and
+// the refresh handler so the minted claim set has exactly one definition.
+//
+// `access` is the already-signed session JWT; mint passes its own fresh
+// signature while refresh re-mints through signSessionJWT via reissueAccess.
+func (h *MintHandler) Reissue(ctx context.Context, access string, issuedAt time.Time, gcid, email, tenantID string, activeRoles []string, memberships []clients.ResolveTenantMembership) (MintResponse, error) {
+	if err := h.sessions.Save(ctx, &session.Session{
+		Token:     access,
+		Gcid:      gcid,
+		TenantID:  tenantID,
+		Roles:     append([]string(nil), activeRoles...),
+		IssuedAt:  issuedAt,
+		ExpiresAt: issuedAt.Add(h.sessionTTL),
+	}); err != nil {
+		return MintResponse{}, err
+	}
+	refreshTok, err := newOpaqueToken()
+	if err != nil {
+		return MintResponse{}, err
+	}
+	if err := h.refreshStore.SaveRefresh(ctx, &session.RefreshRecord{
+		Token:     refreshTok,
+		Gcid:      gcid,
+		Email:     email,
+		TenantID:  tenantID,
+		Roles:     append([]string(nil), activeRoles...),
+		IssuedAt:  issuedAt,
+		ExpiresAt: issuedAt.Add(h.refreshTTL),
+	}); err != nil {
+		return MintResponse{}, err
+	}
 	if memberships == nil {
 		memberships = []clients.ResolveTenantMembership{}
 	}
+	return MintResponse{
+		AccessToken:      access,
+		TokenType:        "Bearer",
+		ExpiresIn:        int(h.sessionTTL.Seconds()),
+		RefreshToken:     refreshTok,
+		RefreshExpiresIn: int(h.refreshTTL.Seconds()),
+		GCID:             gcid,
+		Memberships:      memberships,
+	}, nil
+}
 
-	writeJSON(w, http.StatusOK, MintResponse{
-		AccessToken: access,
-		TokenType:   "Bearer",
-		ExpiresIn:   int(h.sessionTTL.Seconds()),
-		GCID:        gcid,
-		Memberships: memberships,
-	})
+// ReissueFor signs a fresh access JWT for an ALREADY-authorised identity and
+// persists the rotated pair (session row + refresh record). It is the refresh
+// handler's entry point — the mint paths call signSessionJWT + Reissue
+// directly because they mint from the authoritative identity response.
+func (h *MintHandler) ReissueFor(ctx context.Context, gcid, email, tenantID string, roles []string) (MintResponse, error) {
+	now := h.now()
+	access, err := h.signSessionJWT(gcid, email, tenantID, roles, h.sessionTTL, now)
+	if err != nil {
+		return MintResponse{}, err
+	}
+	return h.Reissue(ctx, access, now, gcid, email, tenantID, roles, nil)
+}
+
+// RotateReissue is the refresh handler's rotation. It first consumes the
+// presented refresh token and stores its replacement in ONE atomic store step
+// (ReplaceRefresh), and only then persists the access session row. Doing the
+// consume-and-replace first means a failed rotation writes no access session
+// (nothing to clean up) and leaves the old token active and retryable — no
+// stranded session, no orphaned access row. A concurrent exchange still cannot
+// mint two live descendants, because ReplaceRefresh's consume is atomic.
+//
+// Atomicity scope: the consume-and-replace is atomic WITHIN the refresh store.
+// The access-session row lives in a separate store, so the full mint is not
+// atomic across the two. For the single-instance demo both stores are in-memory
+// and never fail, so the partial-write path is unreachable here; production
+// multi-instance wiring must back both with one transactional store (e.g.
+// Valkey WATCH/MULTI or a single Postgres row).
+//
+// The caller has already pre-checked the presented token (GetRefresh) for a
+// clean error message; ReplaceRefresh re-checks atomically and is authoritative.
+func (h *MintHandler) RotateReissue(ctx context.Context, oldToken, gcid, email, tenantID string, roles []string) (MintResponse, error) {
+	now := h.now()
+	newRefresh, err := newOpaqueToken()
+	if err != nil {
+		return MintResponse{}, err
+	}
+	if err := h.refreshStore.ReplaceRefresh(ctx, oldToken, &session.RefreshRecord{
+		Token:     newRefresh,
+		Gcid:      gcid,
+		Email:     email,
+		TenantID:  tenantID,
+		Roles:     append([]string(nil), roles...),
+		IssuedAt:  now,
+		ExpiresAt: now.Add(h.refreshTTL),
+	}); err != nil {
+		return MintResponse{}, err
+	}
+	access, err := h.signSessionJWT(gcid, email, tenantID, roles, h.sessionTTL, now)
+	if err != nil {
+		return MintResponse{}, err
+	}
+	if err := h.sessions.Save(ctx, &session.Session{
+		Token:     access,
+		Gcid:      gcid,
+		TenantID:  tenantID,
+		Roles:     append([]string(nil), roles...),
+		IssuedAt:  now,
+		ExpiresAt: now.Add(h.sessionTTL),
+	}); err != nil {
+		return MintResponse{}, err
+	}
+	return MintResponse{
+		AccessToken:      access,
+		TokenType:        "Bearer",
+		ExpiresIn:        int(h.sessionTTL.Seconds()),
+		RefreshToken:     newRefresh,
+		RefreshExpiresIn: int(h.refreshTTL.Seconds()),
+		GCID:             gcid,
+	}, nil
+}
+
+// newOpaqueToken mints a 256-bit url-safe opaque token for refresh records.
+func newOpaqueToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 // completeSessionMint runs the mint pipeline for an ALREADY-VERIFIED identity

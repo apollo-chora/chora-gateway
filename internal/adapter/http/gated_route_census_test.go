@@ -82,6 +82,14 @@ var publicByDesign = map[string]string{
 	// because adding a passkey to an account does require already being that
 	// account, and the handler enforces body-gcid == session-gcid.
 	"/api/v1/auth/session/mint":          "exchanges a username/password pair for a Chora session; there is no session to gate on yet",
+	// The renewal pair, same rule as mint: the caller authenticates with
+	// something OTHER than a Chora session JWT — the refresh token (minted
+	// only by mint, rotated on every use) for refresh, and the refresh
+	// token to revoke for logout. Gating either on the access JWT would
+	// strand the session: refresh is how an EXPIRED session recovers, and
+	// logout must work once the access token is gone.
+	"/api/v1/auth/session/refresh":       "exchanges a live refresh token for a rotated session pair; the access JWT is expired/absent by definition, so there is no session to gate on yet",
+	"/api/v1/auth/logout":               "revokes the presented refresh token; sign-out is correct pre-session — refusing it would strand the durable half of the session after the access token expires",
 	"/api/v1/auth/webauthn/login/begin":  "passkey sign-in challenge; pre-session by definition, and register/ is gated",
 	"/api/v1/auth/webauthn/login/finish": "passkey sign-in assertion; pre-session by definition, and register/ is gated",
 	// The A+ course catalogue is genuinely pre-login: its route carries no

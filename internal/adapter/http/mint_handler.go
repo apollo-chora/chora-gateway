@@ -390,6 +390,13 @@ func (h *MintHandler) ReissueFor(ctx context.Context, gcid, email, tenantID stri
 // stranded session, no orphaned access row. A concurrent exchange still cannot
 // mint two live descendants, because ReplaceRefresh's consume is atomic.
 //
+// Atomicity scope: the consume-and-replace is atomic WITHIN the refresh store.
+// The access-session row lives in a separate store, so the full mint is not
+// atomic across the two. For the single-instance demo both stores are in-memory
+// and never fail, so the partial-write path is unreachable here; production
+// multi-instance wiring must back both with one transactional store (e.g.
+// Valkey WATCH/MULTI or a single Postgres row).
+//
 // The caller has already pre-checked the presented token (GetRefresh) for a
 // clean error message; ReplaceRefresh re-checks atomically and is authoritative.
 func (h *MintHandler) RotateReissue(ctx context.Context, oldToken, gcid, email, tenantID string, roles []string) (MintResponse, error) {

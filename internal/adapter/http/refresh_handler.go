@@ -20,7 +20,6 @@
 package httpadapter
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -95,34 +94,32 @@ func (h *RefreshHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rec, err := h.store.GetRefresh(r.Context(), token)
+	rec, err := h.store.ConsumeRefresh(r.Context(), token)
 	if err != nil {
-		h.writeRefreshError(w, http.StatusUnauthorized,
-			"AUTH_REFRESH_INVALID", "unknown refresh token")
-		return
-	}
-	if rec.Revoked {
-		h.writeRefreshError(w, http.StatusUnauthorized,
-			"AUTH_REFRESH_REVOKED", "refresh token has been revoked")
-		return
-	}
-	if rec.IsExpired(h.mint.now()) {
-		h.writeRefreshError(w, http.StatusUnauthorized,
-			"AUTH_REFRESH_EXPIRED", "refresh token expired — sign in again")
+		switch {
+		case errors.Is(err, session.ErrRefreshNotFound):
+			h.writeRefreshError(w, http.StatusUnauthorized,
+				"AUTH_REFRESH_INVALID", "unknown refresh token")
+		case errors.Is(err, session.ErrRefreshAlreadyConsumed):
+			h.writeRefreshError(w, http.StatusUnauthorized,
+				"AUTH_REFRESH_REVOKED", "refresh token has already been used")
+		case errors.Is(err, session.ErrRefreshExpired):
+			h.writeRefreshError(w, http.StatusUnauthorized,
+				"AUTH_REFRESH_EXPIRED", "refresh token expired — sign in again")
+		default:
+			h.writeRefreshError(w, http.StatusInternalServerError,
+				"AUTH_REFRESH_CONSUME_FAILED", sanitizeErr(err))
+		}
 		return
 	}
 
-	// Mint the rotated pair FIRST so a mint failure never strands the
-	// caller; the old record is revoked best-effort afterwards.
-	resp, err := h.mint.ReissueFor(context.WithoutCancel(r.Context()), rec.Gcid, rec.Email, rec.TenantID, rec.Roles)
+	// ConsumeRefresh already claimed the presented token atomically, so a
+	// failed mint never strands the caller and a stolen record cannot be
+	// replayed past its first use.
+	resp, err := h.mint.ReissueFor(r.Context(), rec.Gcid, rec.Email, rec.TenantID, rec.Roles)
 	if err != nil {
 		h.writeRefreshError(w, http.StatusInternalServerError,
 			"AUTH_SESSION_MINT_FAILED", sanitizeErr(err))
-		return
-	}
-	if err := h.store.RevokeRefresh(context.WithoutCancel(r.Context()), token); err != nil {
-		h.writeRefreshError(w, http.StatusInternalServerError,
-			"AUTH_REFRESH_REVOKE_FAILED", sanitizeErr(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)

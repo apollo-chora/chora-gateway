@@ -6,9 +6,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -227,5 +229,60 @@ func TestRefresh_MethodNotAllowed(t *testing.T) {
 	f.refresh.Refresh(w, r)
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d want 405", w.Code)
+	}
+}
+
+// TestRefresh_ConcurrentRotationIsAtomic fires many ConsumeRefresh calls at the
+// same token and asserts exactly one succeeds — the rotation must be atomic so
+// a stolen record or a network retry cannot mint two live descendant sessions.
+func TestRefresh_ConcurrentRotationIsAtomic(t *testing.T) {
+	f := newRefreshFixture(t)
+	ctx := context.Background()
+	if err := f.store.SaveRefresh(ctx, &session.RefreshRecord{
+		Token:     "race-token",
+		Gcid:      defaultVerifyResponse().GCID,
+		Email:     mintTestEmail,
+		TenantID:  mintDefaultTenantID,
+		Roles:     []string{"learner"},
+		IssuedAt:  time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("seed record: %v", err)
+	}
+
+	const workers = 8
+	var wg sync.WaitGroup
+	errCh := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := f.store.ConsumeRefresh(ctx, "race-token")
+			errCh <- err
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	ok, consumed, other := 0, 0, 0
+	for err := range errCh {
+		switch {
+		case err == nil:
+			ok++
+		case errors.Is(err, session.ErrRefreshAlreadyConsumed):
+			consumed++
+		default:
+			other++
+			t.Errorf("unexpected consume error: %v", err)
+		}
+	}
+	if ok != 1 {
+		t.Errorf("exactly one consume must succeed, got %d", ok)
+	}
+	if consumed != workers-1 {
+		t.Errorf("remaining consumes must report already-consumed, got %d want %d", consumed, workers-1)
+	}
+	if other != 0 {
+		t.Errorf("unexpected errors: %d", other)
 	}
 }

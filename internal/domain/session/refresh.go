@@ -9,6 +9,15 @@ import (
 // ErrRefreshNotFound is returned when no refresh record exists for a token.
 var ErrRefreshNotFound = errors.New("refresh token not found")
 
+// ErrRefreshAlreadyConsumed is returned when a token has already been spent by
+// a prior refresh. Refresh tokens are single-use: a second consume of the same
+// token (a concurrent request, a network retry, or a replayed stolen token)
+// must fail rather than mint another live session.
+var ErrRefreshAlreadyConsumed = errors.New("refresh token already consumed")
+
+// ErrRefreshExpired is returned when a token has passed its expiry.
+var ErrRefreshExpired = errors.New("refresh token expired")
+
 // RefreshRecord is the durable half of a Chora session. The access JWT is
 // stateless and short-lived (CHORA_SESSION_TTL_SECONDS, default 1h); the
 // refresh record is the opaque, rotatable credential that survives reloads
@@ -45,4 +54,11 @@ type RefreshStore interface {
 	// RevokeRefresh marks the record revoked (sign-out / rotation).
 	// Idempotent — a missing token is not an error.
 	RevokeRefresh(ctx context.Context, token string) error
+
+	// ConsumeRefresh atomically claims the record for a single use: it returns
+	// the record only if it is present, unexpired, and not already consumed, and
+	// marks it consumed in the same locked step. This is what makes rotation
+	// safe — two requests racing the same token cannot both mint a live
+	// session; the loser gets ErrRefreshAlreadyConsumed.
+	ConsumeRefresh(ctx context.Context, token string) (*RefreshRecord, error)
 }

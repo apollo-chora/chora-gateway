@@ -3,6 +3,7 @@ package inmem
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/apollo-chora/chora-gateway/internal/domain/session"
 )
@@ -51,4 +52,25 @@ func (r *RefreshStore) RevokeRefresh(_ context.Context, token string) error {
 		rec.Revoked = true
 	}
 	return nil
+}
+
+// ConsumeRefresh atomically claims the record for a single use. The check
+// (present, unexpired, not consumed) and the mark happen under one lock, so
+// concurrent exchanges of the same token cannot both succeed — the loser sees
+// the record already consumed.
+func (r *RefreshStore) ConsumeRefresh(_ context.Context, token string) (*session.RefreshRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.records[token]
+	if !ok {
+		return nil, session.ErrRefreshNotFound
+	}
+	if rec.Revoked {
+		return nil, session.ErrRefreshAlreadyConsumed
+	}
+	if rec.IsExpired(time.Now().UTC()) {
+		return nil, session.ErrRefreshExpired
+	}
+	rec.Revoked = true
+	return cloneRefresh(rec), nil
 }

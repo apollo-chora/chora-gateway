@@ -61,4 +61,11 @@ type RefreshStore interface {
 	// safe — two requests racing the same token cannot both mint a live
 	// session; the loser gets ErrRefreshAlreadyConsumed.
 	ConsumeRefresh(ctx context.Context, token string) (*RefreshRecord, error)
+
+	// ReplaceRefresh atomically consumes the presented token and persists its
+	// replacement in one locked step: the old record is marked consumed ONLY if
+	// the new record is stored. A failed rotation therefore leaves the old
+	// token active and retryable (no stranded session), and a concurrent
+	// exchange cannot mint two live descendants.
+	ReplaceRefresh(ctx context.Context, oldToken string, newRec *RefreshRecord) error
 }

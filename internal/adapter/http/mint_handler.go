@@ -382,6 +382,56 @@ func (h *MintHandler) ReissueFor(ctx context.Context, gcid, email, tenantID stri
 	return h.Reissue(ctx, access, now, gcid, email, tenantID, roles, nil)
 }
 
+// RotateReissue is the refresh handler's atomic rotation: it mints a fresh
+// access JWT, persists the access session row, then consumes the presented
+// refresh token and stores its replacement in ONE locked store step. Because
+// the consume-and-replace is atomic, a failed rotation leaves the old token
+// active and retryable (no stranded session) and a concurrent exchange cannot
+// mint two live descendants.
+//
+// The caller has already pre-checked the presented token (GetRefresh) for a
+// clean error message; ReplaceRefresh re-checks atomically and is authoritative.
+func (h *MintHandler) RotateReissue(ctx context.Context, oldToken, gcid, email, tenantID string, roles []string) (MintResponse, error) {
+	now := h.now()
+	access, err := h.signSessionJWT(gcid, email, tenantID, roles, h.sessionTTL, now)
+	if err != nil {
+		return MintResponse{}, err
+	}
+	if err := h.sessions.Save(ctx, &session.Session{
+		Token:     access,
+		Gcid:      gcid,
+		TenantID:  tenantID,
+		Roles:     append([]string(nil), roles...),
+		IssuedAt:  now,
+		ExpiresAt: now.Add(h.sessionTTL),
+	}); err != nil {
+		return MintResponse{}, err
+	}
+	newRefresh, err := newOpaqueToken()
+	if err != nil {
+		return MintResponse{}, err
+	}
+	if err := h.refreshStore.ReplaceRefresh(ctx, oldToken, &session.RefreshRecord{
+		Token:     newRefresh,
+		Gcid:      gcid,
+		Email:     email,
+		TenantID:  tenantID,
+		Roles:     append([]string(nil), roles...),
+		IssuedAt:  now,
+		ExpiresAt: now.Add(h.refreshTTL),
+	}); err != nil {
+		return MintResponse{}, err
+	}
+	return MintResponse{
+		AccessToken:      access,
+		TokenType:        "Bearer",
+		ExpiresIn:        int(h.sessionTTL.Seconds()),
+		RefreshToken:     newRefresh,
+		RefreshExpiresIn: int(h.refreshTTL.Seconds()),
+		GCID:             gcid,
+	}, nil
+}
+
 // newOpaqueToken mints a 256-bit url-safe opaque token for refresh records.
 func newOpaqueToken() (string, error) {
 	buf := make([]byte, 32)

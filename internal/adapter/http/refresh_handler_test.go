@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -255,11 +256,19 @@ func TestRefresh_ConcurrentRotationIsAtomic(t *testing.T) {
 	errCh := make(chan error, workers)
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			_, err := f.store.ConsumeRefresh(ctx, "race-token")
-			errCh <- err
-		}()
+			newRec := &session.RefreshRecord{
+				Token:     fmt.Sprintf("new-%d", i),
+				Gcid:      defaultVerifyResponse().GCID,
+				Email:     mintTestEmail,
+				TenantID:  mintDefaultTenantID,
+				Roles:     []string{"learner"},
+				IssuedAt:  time.Now().UTC(),
+				ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+			}
+			errCh <- f.store.ReplaceRefresh(ctx, "race-token", newRec)
+		}(i)
 	}
 	wg.Wait()
 	close(errCh)
@@ -273,16 +282,66 @@ func TestRefresh_ConcurrentRotationIsAtomic(t *testing.T) {
 			consumed++
 		default:
 			other++
-			t.Errorf("unexpected consume error: %v", err)
+			t.Errorf("unexpected replace error: %v", err)
 		}
 	}
 	if ok != 1 {
-		t.Errorf("exactly one consume must succeed, got %d", ok)
+		t.Errorf("exactly one rotation must succeed, got %d", ok)
 	}
 	if consumed != workers-1 {
-		t.Errorf("remaining consumes must report already-consumed, got %d want %d", consumed, workers-1)
+		t.Errorf("remaining rotations must report already-consumed, got %d want %d", consumed, workers-1)
 	}
 	if other != 0 {
 		t.Errorf("unexpected errors: %d", other)
+	}
+}
+
+// TestRefresh_FailedRotationKeepsOldTokenActive verifies the no-stranding
+// property: a second ReplaceRefresh of an already-consumed token fails cleanly
+// and must NOT store another replacement (no live descendant is minted for the
+// loser).
+func TestRefresh_FailedRotationKeepsOldTokenActive(t *testing.T) {
+	f := newRefreshFixture(t)
+	ctx := context.Background()
+	if err := f.store.SaveRefresh(ctx, &session.RefreshRecord{
+		Token:     "spent-token",
+		Gcid:      defaultVerifyResponse().GCID,
+		Email:     mintTestEmail,
+		TenantID:  mintDefaultTenantID,
+		Roles:     []string{"learner"},
+		IssuedAt:  time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("seed record: %v", err)
+	}
+
+	first := &session.RefreshRecord{
+		Token:     "replacement-1",
+		Gcid:      defaultVerifyResponse().GCID,
+		Email:     mintTestEmail,
+		TenantID:  mintDefaultTenantID,
+		Roles:     []string{"learner"},
+		IssuedAt:  time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}
+	if err := f.store.ReplaceRefresh(ctx, "spent-token", first); err != nil {
+		t.Fatalf("first rotation: %v", err)
+	}
+
+	second := &session.RefreshRecord{
+		Token:     "replacement-2",
+		Gcid:      defaultVerifyResponse().GCID,
+		Email:     mintTestEmail,
+		TenantID:  mintDefaultTenantID,
+		Roles:     []string{"learner"},
+		IssuedAt:  time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}
+	err := f.store.ReplaceRefresh(ctx, "spent-token", second)
+	if !errors.Is(err, session.ErrRefreshAlreadyConsumed) {
+		t.Fatalf("second rotation error = %v want ErrRefreshAlreadyConsumed", err)
+	}
+	if _, getErr := f.store.GetRefresh(ctx, "replacement-2"); getErr == nil {
+		t.Errorf("failed rotation must not store a replacement record")
 	}
 }

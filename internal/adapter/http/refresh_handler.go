@@ -94,7 +94,30 @@ func (h *RefreshHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rec, err := h.store.ConsumeRefresh(r.Context(), token)
+	// Pre-check for a clean error message; the authoritative atomic check
+	// happens inside RotateReissue (ReplaceRefresh).
+	rec, err := h.store.GetRefresh(r.Context(), token)
+	if err != nil {
+		h.writeRefreshError(w, http.StatusUnauthorized,
+			"AUTH_REFRESH_INVALID", "unknown refresh token")
+		return
+	}
+	if rec.Revoked {
+		h.writeRefreshError(w, http.StatusUnauthorized,
+			"AUTH_REFRESH_REVOKED", "refresh token has been revoked")
+		return
+	}
+	if rec.IsExpired(h.mint.now()) {
+		h.writeRefreshError(w, http.StatusUnauthorized,
+			"AUTH_REFRESH_EXPIRED", "refresh token expired — sign in again")
+		return
+	}
+
+	// Atomic rotation: RotateReissue mints + persists the new pair, then
+	// consumes the old token and stores the replacement in ONE locked store
+	// step. A failed rotation leaves the old token active (retryable), and a
+	// concurrent exchange cannot mint two live descendants.
+	resp, err := h.mint.RotateReissue(r.Context(), token, rec.Gcid, rec.Email, rec.TenantID, rec.Roles)
 	if err != nil {
 		switch {
 		case errors.Is(err, session.ErrRefreshNotFound):
@@ -108,18 +131,8 @@ func (h *RefreshHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 				"AUTH_REFRESH_EXPIRED", "refresh token expired — sign in again")
 		default:
 			h.writeRefreshError(w, http.StatusInternalServerError,
-				"AUTH_REFRESH_CONSUME_FAILED", sanitizeErr(err))
+				"AUTH_SESSION_MINT_FAILED", sanitizeErr(err))
 		}
-		return
-	}
-
-	// ConsumeRefresh already claimed the presented token atomically, so a
-	// failed mint never strands the caller and a stolen record cannot be
-	// replayed past its first use.
-	resp, err := h.mint.ReissueFor(r.Context(), rec.Gcid, rec.Email, rec.TenantID, rec.Roles)
-	if err != nil {
-		h.writeRefreshError(w, http.StatusInternalServerError,
-			"AUTH_SESSION_MINT_FAILED", sanitizeErr(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)

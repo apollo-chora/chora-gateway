@@ -74,3 +74,24 @@ func (r *RefreshStore) ConsumeRefresh(_ context.Context, token string) (*session
 	rec.Revoked = true
 	return cloneRefresh(rec), nil
 }
+
+// ReplaceRefresh atomically consumes oldToken and persists newRec in one locked
+// step. The old record is marked consumed only if the new record is stored, so
+// a failed rotation leaves the old token active and retryable.
+func (r *RefreshStore) ReplaceRefresh(_ context.Context, oldToken string, newRec *session.RefreshRecord) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	old, ok := r.records[oldToken]
+	if !ok {
+		return session.ErrRefreshNotFound
+	}
+	if old.Revoked {
+		return session.ErrRefreshAlreadyConsumed
+	}
+	if old.IsExpired(time.Now().UTC()) {
+		return session.ErrRefreshExpired
+	}
+	old.Revoked = true
+	r.records[newRec.Token] = cloneRefresh(newRec)
+	return nil
+}

@@ -117,7 +117,7 @@ func (h *RefreshHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	// consumes the old token and stores the replacement in ONE locked store
 	// step. A failed rotation leaves the old token active (retryable), and a
 	// concurrent exchange cannot mint two live descendants.
-	resp, err := h.mint.RotateReissue(r.Context(), token, rec.Gcid, rec.Email, rec.TenantID, rec.Roles)
+	resp, err := h.mint.RotateReissue(r.Context(), token, rec.Gcid, rec.Email, rec.TenantID, rec.Roles, rec.Memberships)
 	if err != nil {
 		switch {
 		case errors.Is(err, session.ErrRefreshNotFound):

@@ -183,6 +183,42 @@ func TestRefresh_HappyPathRotatesSession(t *testing.T) {
 	}
 }
 
+// A refresh must carry the SAME envelope shape as a mint. The BFF seeds its
+// surface rail from memberships[].surfaces, so a refresh that omitted them left
+// the client with no surface data and the surface guard failed closed to A+.
+func TestRefresh_CarriesMembershipsSoSurfacesSurvive(t *testing.T) {
+	f := newRefreshFixture(t)
+	// Give the minted membership the surfaces the BFF's surface rail reads.
+	f.creds.resp.Memberships[0].Surfaces = []string{"aplus", "rplus"}
+	mint := f.mintSession(t)
+	oldRefresh, _ := mint["refresh_token"].(string)
+
+	w := postRefresh(t, f, `{"refresh_token":"`+oldRefresh+`"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	body := decodeRefreshBody(t, w)
+	raw, present := body["memberships"]
+	if !present {
+		t.Fatal("refresh response has no memberships key")
+	}
+	if raw == nil {
+		t.Fatal("refresh memberships = null — the BFF treats null as present and wipes the surface rail")
+	}
+	list, ok := raw.([]any)
+	if !ok || len(list) == 0 {
+		t.Fatalf("refresh memberships = %#v, want a non-empty array", raw)
+	}
+	first, _ := list[0].(map[string]any)
+	if first["tenant_id"] != mintDefaultTenantID {
+		t.Errorf("membership tenant_id = %v want %v", first["tenant_id"], mintDefaultTenantID)
+	}
+	surfaces, _ := first["surfaces"].([]any)
+	if len(surfaces) != 2 || surfaces[0] != "aplus" || surfaces[1] != "rplus" {
+		t.Errorf("membership surfaces = %#v, want [aplus rplus] — the surface rail reads these", first["surfaces"])
+	}
+}
+
 func TestRefresh_UnknownToken(t *testing.T) {
 	f := newRefreshFixture(t)
 	w := postRefresh(t, f, `{"refresh_token":"does-not-exist"}`)

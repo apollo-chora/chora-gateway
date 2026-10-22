@@ -18,22 +18,39 @@ var ErrRefreshAlreadyConsumed = errors.New("refresh token already consumed")
 // ErrRefreshExpired is returned when a token has passed its expiry.
 var ErrRefreshExpired = errors.New("refresh token expired")
 
+// Membership is the tenant-scoped membership snapshot stored with a refresh
+// record. A refresh must re-emit the same envelope shape as a mint, and the BFF
+// seeds its surface rail from memberships[].surfaces — so the snapshot is what
+// keeps a surface the caller already holds visible across a token rotation.
+//
+// It is deliberately a domain type, not the adapter's wire DTO: the session
+// package must not import the HTTP client layer.
+type Membership struct {
+	TenantID   string   `json:"tenant_id"`
+	TenantSlug string   `json:"tenant_slug"`
+	Roles      []string `json:"roles"`
+	Surfaces   []string `json:"surfaces"`
+	IsDefault  bool     `json:"is_default"`
+}
+
 // RefreshRecord is the durable half of a Chora session. The access JWT is
 // stateless and short-lived (CHORA_SESSION_TTL_SECONDS, default 1h); the
 // refresh record is the opaque, rotatable credential that survives reloads
 // and lets the gateway mint a fresh access JWT without a password.
 //
 // Rotation: every refresh revokes the presented record and stores a new
-// one, so a stolen record cannot be replayed after its first use.
+// one, so a stolen record cannot be replayed after its first use. The new
+// record inherits Memberships from the one it replaces.
 type RefreshRecord struct {
-	Token     string    `json:"token"`      // opaque, server-issued
-	Gcid      string    `json:"gcid"`       // session owner
-	Email     string    `json:"email"`
-	TenantID  string    `json:"tenant_id"`
-	Roles     []string  `json:"roles"`
-	IssuedAt  time.Time `json:"issued_at"`
-	ExpiresAt time.Time `json:"expires_at"`
-	Revoked   bool      `json:"revoked"`
+	Token      string       `json:"token"`      // opaque, server-issued
+	Gcid       string       `json:"gcid"`       // session owner
+	Email      string       `json:"email"`
+	TenantID   string       `json:"tenant_id"`
+	Roles      []string     `json:"roles"`
+	Memberships []Membership `json:"memberships,omitempty"`
+	IssuedAt   time.Time    `json:"issued_at"`
+	ExpiresAt  time.Time    `json:"expires_at"`
+	Revoked    bool         `json:"revoked"`
 }
 
 // IsExpired reports whether the record has reached its expiry at now

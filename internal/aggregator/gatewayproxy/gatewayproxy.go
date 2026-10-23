@@ -1029,6 +1029,20 @@ func (a *Aggregator) GetDailyDoseAI(ctx context.Context, auth AuthCtx) (Response
 	return classify(a.callWithTimeout(ctx, http.MethodGet, u, nil, auth, a.cfg.PostCreateTimeout)), nil
 }
 
+// PostCompanionGreeting proxies K49's greeting-only call (kiosk D8,
+// POST /api/companion/greeting) to chora-consumption /companion/greeting,
+// body verbatim. The greeting is one Companion turn on the bus, so it takes
+// the long PostCreateTimeout like the daily-dose enrichment; consumption
+// answers 404 in the cloud edition, where the route is not wired.
+func (a *Aggregator) PostCompanionGreeting(ctx context.Context, auth AuthCtx, body []byte) (Response, error) {
+	if a.cfg.ConsumptionURL == "" {
+		return errResp(http.StatusBadGateway, "GATEWAY_NOT_CONFIGURED",
+			"SVC_CONSUMPTION_URL must be set for /api/companion/greeting"), nil
+	}
+	u := a.cfg.ConsumptionURL + "/companion/greeting"
+	return classify(a.callWithTimeout(ctx, http.MethodPost, u, body, auth, a.cfg.PostCreateTimeout)), nil
+}
+
 // ListAtoms proxies GET /api/atoms?status=... → chora-creation listAtoms.
 // Query string forwarded verbatim so the downstream status filter parses
 // canonically.

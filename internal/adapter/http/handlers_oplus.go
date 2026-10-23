@@ -309,6 +309,9 @@ type GovernanceTabsResponse struct {
 	// WindowDays is the data-currency window (in days) the Decision Traces are
 	// drawn from — surfaced so O+ can show auditors "last N days · as of <ts>".
 	WindowDays int `json:"window_days"`
+	// TraceFilter echoes the ?trace_id= the decisions are filtered to (V5,
+	// kiosk D8), so a caller can tell a filtered board from an unfiltered one.
+	TraceFilter string `json:"trace_filter,omitempty"`
 }
 
 // Decision-Traces data currency. Auditors review the recent decision history,
@@ -581,14 +584,44 @@ func (h *OPlusHandler) Governance3Tab(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "GATEWAY_METHOD_NOT_ALLOWED", "GET only")
 		return
 	}
+	// V5 (kiosk D8): ?trace_id= narrows the decisions to one generation. A
+	// value that is not a W3C trace id refuses (an ignored filter would show
+	// every run's decisions as if they were this one's).
+	traceFilter, filtered := "", false
+	if raw, ok := r.URL.Query()["trace_id"]; ok {
+		traceFilter, filtered = strings.TrimSpace(strings.Join(raw, "")), true
+		if len(raw) != 1 || !validW3CTraceID(traceFilter) {
+			writeError(w, http.StatusBadRequest, "GATEWAY_INVALID_QUERY",
+				"trace_id must be one W3C trace id (32 lowercase hex, not all zero)")
+			return
+		}
+	}
+
 	ctx := withUpstreamAuthCtx(r)
 	tenantID, _ := upstreamCtx(ctx)
 
 	since := h.now().Add(-governanceDecisionWindowDays * 24 * time.Hour).Format(time.RFC3339)
-	decisions, decErr := h.Observability.GetAgentDecisions(ctx, tenantID, since, "", governanceDecisionLimit)
+	var (
+		decisions upstream.AgentDecisionsResponse
+		decErr    error
+	)
+	if filtered {
+		decisions, decErr = h.Observability.GetAgentDecisionsForTrace(ctx, tenantID, since, traceFilter, governanceDecisionLimit)
+	} else {
+		decisions, decErr = h.Observability.GetAgentDecisions(ctx, tenantID, since, "", governanceDecisionLimit)
+	}
 	if decErr != nil {
 		writeOPlusError(w, "GetAgentDecisions", decErr, h.now())
 		return
+	}
+	if filtered {
+		for _, d := range decisions.Items {
+			if d.TraceID != traceFilter {
+				writeOPlusError(w, "GetAgentDecisionsForTrace",
+					fmt.Errorf("upstream returned decision %s of trace %q for trace_id %s: the filter did not hold", d.LogID, d.TraceID, traceFilter), h.now())
+				return
+			}
+		}
 	}
 
 	// HITL (Oversight tab) is a SECONDARY source. A failure there — e.g. the
@@ -620,8 +653,23 @@ func (h *OPlusHandler) Governance3Tab(w http.ResponseWriter, r *http.Request) {
 		HITLPending:   hitlViews,
 		DataLineage:   h.dataLineagePayload(),
 		WindowDays:    governanceDecisionWindowDays,
+		TraceFilter:   traceFilter,
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// validW3CTraceID reports a W3C trace id: 32 lowercase hex characters, not
+// all zero.
+func validW3CTraceID(id string) bool {
+	if len(id) != 32 || id == "00000000000000000000000000000000" {
+		return false
+	}
+	for _, c := range id {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // A2APanel returns either the live A2A console view or a `mode:'pending'`

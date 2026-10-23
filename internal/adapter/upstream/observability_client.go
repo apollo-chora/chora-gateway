@@ -355,6 +355,20 @@ func (o *ObservabilityClient) GetAgentPrompts(ctx context.Context, tenantID stri
 // (or empty for "last 24h"); `limit` defaults to 50; `cursor` for follow-up
 // pages.
 func (o *ObservabilityClient) GetAgentDecisions(ctx context.Context, tenantID, since, cursor string, limit int) (AgentDecisionsResponse, error) {
+	return o.listAgentDecisions(ctx, tenantID, since, cursor, "", limit)
+}
+
+// GetAgentDecisionsForTrace fetches one generation's decisions: the rows whose
+// traceparent carries traceID (V5, kiosk D8). chora-observability's read does
+// the filtering; the caller still checks every row it got back.
+func (o *ObservabilityClient) GetAgentDecisionsForTrace(ctx context.Context, tenantID, since, traceID string, limit int) (AgentDecisionsResponse, error) {
+	if traceID == "" {
+		return AgentDecisionsResponse{}, fmt.Errorf("%w: GetAgentDecisionsForTrace: empty trace id", ErrUpstream)
+	}
+	return o.listAgentDecisions(ctx, tenantID, since, "", traceID, limit)
+}
+
+func (o *ObservabilityClient) listAgentDecisions(ctx context.Context, tenantID, since, cursor, traceID string, limit int) (AgentDecisionsResponse, error) {
 	if o == nil || o.cfg.HTTPAddr == "" {
 		return AgentDecisionsResponse{}, fmt.Errorf("%w: observability: HTTP addr not wired", ErrUpstream)
 	}
@@ -370,6 +384,9 @@ func (o *ObservabilityClient) GetAgentDecisions(ctx context.Context, tenantID, s
 	}
 	if cursor != "" {
 		q.Set("cursor", cursor)
+	}
+	if traceID != "" {
+		q.Set("trace_id", traceID)
 	}
 	q.Set("limit", fmt.Sprintf("%d", limit))
 	u := strings.TrimRight(o.cfg.HTTPAddr, "/") + "/api/agent-decisions?" + q.Encode()

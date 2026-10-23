@@ -29,6 +29,11 @@ const (
 	// EnvAIKernelOrchestratorURL supplies the chora-ai-kernel-orchestrator
 	// base URL.
 	EnvAIKernelOrchestratorURL = "AI_KERNEL_ORCHESTRATOR_URL"
+	// EnvAIKernelIDTokenAudience opts the resume client into Cloud Run IAM ID
+	// tokens. "auto" = use the base URL as the audience. The kiosk edition
+	// refuses it (kiosk_edition.go kioskCloudOnlySettings): the kiosk has no
+	// Google project, so the review resume rides no ID token.
+	EnvAIKernelIDTokenAudience = "AI_KERNEL_ORCHESTRATOR_ID_TOKEN_AUDIENCE"
 )
 
 // NewWeaknessResumeHandlerFromEnv constructs the Growth-Edge resume handler

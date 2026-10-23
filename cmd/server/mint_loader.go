@@ -44,6 +44,19 @@ const (
 	EnvIdentityURL            = "CHORA_IDENTITY_URL"
 	EnvSVCIdentityURL         = "SVC_IDENTITY_URL"
 	EnvMintDisabled           = "MINT_DISABLED"
+
+	// The cloud edition's IdP / Secret Manager env names, refused by the kiosk
+	// edition (kiosk_edition.go kioskCloudOnlySettings). This gateway's mint is
+	// the GCP-free username/password one and reads none of them, so a value is
+	// never honoured here — the constants exist so the kiosk boot refuses it.
+	EnvFirebaseIssuerURL = "FIREBASE_ISSUER_URL"
+	EnvFirebaseAudience  = "FIREBASE_AUDIENCE"
+	// EnvIDPEmailAllowlistSec is the provider-agnostic allowlist secret-name
+	// env (ADR-181 §4.4a).
+	EnvIDPEmailAllowlistSec = "IDP_EMAIL_ALLOWLIST_SECRET"
+	// EnvIDPGoogleEmailAllowlistSec is the deprecated Google-infixed spelling,
+	// refused alongside the provider-agnostic one.
+	EnvIDPGoogleEmailAllowlistSec = "IDP_GOOGLE_EMAIL_ALLOWLIST_SECRET"
 )
 
 // DefaultRefreshTTL is the refresh-record lifetime when

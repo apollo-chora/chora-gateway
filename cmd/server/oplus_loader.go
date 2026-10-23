@@ -124,7 +124,15 @@ var ErrOPlusBackendMissing = errors.New("oplus: required backend env var missing
 //	                                     ErrOPlusBackendMissing)
 //
 //	A2A addr always optional (empty = pending mode).
-func NewOPlusHandlerFromEnv(_ context.Context) (*httpadapter.OPlusHandler, func() error, middleware.RoleResolver, error) {
+func NewOPlusHandlerFromEnv(ctx context.Context) (*httpadapter.OPlusHandler, func() error, middleware.RoleResolver, error) {
+	return newOPlusHandler(ctx, false)
+}
+
+// newOPlusHandler is NewOPlusHandlerFromEnv with one kiosk switch. governanceAbsent
+// (the kiosk edition, ADR-260 D1: the laptop runs no chora-governance) builds the
+// handler with no governance client and requires no governance address. The cloud
+// passes false and keeps every check.
+func newOPlusHandler(_ context.Context, governanceAbsent bool) (*httpadapter.OPlusHandler, func() error, middleware.RoleResolver, error) {
 	resolver := middleware.NewChoraSessionRoleResolver(
 		choraSessionClaimsFromRequest,
 		meshClaimsFromRequest,
@@ -143,6 +151,19 @@ func NewOPlusHandlerFromEnv(_ context.Context) (*httpadapter.OPlusHandler, func(
 	govHTTPAddr := strings.TrimSpace(os.Getenv(EnvGovernanceHTTPAddr))
 	obsHTTPAddr := strings.TrimSpace(os.Getenv(EnvObservabilityHTTPAddr))
 	a2aHTTPAddr := strings.TrimSpace(os.Getenv(EnvA2AHTTPAddr))
+
+	if governanceAbsent {
+		if obsHTTPAddr == "" {
+			return nil, func() error { return nil }, nil,
+				fmt.Errorf("%w: %s", ErrOPlusBackendMissing, EnvObservabilityHTTPAddr)
+		}
+		h := httpadapter.NewOPlusHandler(nil,
+			upstream.NewObservabilityClient(upstream.ObservabilityConfig{HTTPAddr: obsHTTPAddr}, nil),
+			upstream.NewA2AClient(upstream.A2AConfig{HTTPAddr: a2aHTTPAddr}, nil),
+			httpadapter.LoadDataLineageYAMLFromEnv())
+		h.DisplayCurrency, h.FxRate = httpadapter.LoadCostDisplayConfigFromEnv()
+		return h, func() error { return nil }, resolver, nil
+	}
 
 	// Boot-fail-loud on the three REQUIRED addresses. A2A may be empty
 	// (pending-deployment signal — handler renders {mode:'pending'}).

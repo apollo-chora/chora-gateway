@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/apollo-chora/chora-common/auth/chorasession"
 
 	"github.com/apollo-chora/chora-gateway/internal/adapter/clients"
 	httpadapter "github.com/apollo-chora/chora-gateway/internal/adapter/http"
@@ -55,8 +58,19 @@ func main() {
 	// in the same commit. EVERY required env var MUST be set for the
 	// process to bind a port. Missing var → log.Fatalf, pod CrashLoopBackOff,
 	// ops fixes config.
-	if err := CheckBootEnv(); err != nil {
+	//
+	// The kiosk edition (CHORA_EDITION=kiosk, kiosk branch only) replaces this gate with its
+	// own; see kiosk_edition.go. Unset, the cloud gate runs unchanged.
+	kiosk, err := loadKioskEdition()
+	if err != nil {
 		log.Fatalf("boot env gate failed: %v", err)
+	}
+	if kiosk == nil {
+		if err := CheckBootEnv(); err != nil {
+			log.Fatalf("boot env gate failed: %v", err)
+		}
+	} else {
+		log.Printf("WARN %s", kiosk.bootLine())
 	}
 
 	shutdown, err := observability.Init(ctx)
@@ -74,6 +88,129 @@ func main() {
 		}
 	}()
 
+	// chora-session HS256 Validator — Bucket 2/3 of the 2026-05-14 arch-gap
+	// closure. Validates Chora session JWTs minted by /api/v1/auth/session/mint
+	// on the /api/* trust boundary. Replaces the previous JWKS-backed
+	// the previous validator that produced "unknown signing key (kid)"
+	// 401s for every /api/me call.
+	//
+	// Signer key + issuer + audience all sourced from env per
+	// `feedback_no_inline_config`. Fail-loud on any missing input — the
+	// boot env gate above has already enforced presence so this returning
+	// an error is exclusively a Secret Manager / network issue.
+	//
+	// The kiosk edition reads the signer from the internal secrets file through
+	// its own dotenv reader (kiosk_edition.go secretReader); the cloud edition
+	// reads CHORA_SESSION_SIGNER.
+	var (
+		choraSessionValidator *chorasession.Validator
+		choraSessionCleanup   func() error
+	)
+	if kiosk != nil {
+		choraSessionValidator, choraSessionCleanup, err = NewChoraSessionValidatorFromEnvWith(ctx, kiosk.secretReader())
+	} else {
+		choraSessionValidator, choraSessionCleanup, err = NewChoraSessionValidatorFromEnv(ctx)
+	}
+	if err != nil {
+		log.Fatalf("chora-session validator init failed: %v", err)
+	}
+	defer func() {
+		if choraSessionCleanup != nil {
+			if err := choraSessionCleanup(); err != nil {
+				log.Printf("chora-session validator cleanup error: %v", err)
+			}
+		}
+	}()
+	log.Printf("chora-session validator wired (issuer=%s, aud=%s) — /api/* gated by HS256 chora-session",
+		os.Getenv(EnvChoraSessionIssuerURL), os.Getenv(EnvChoraSessionAudienceURL))
+
+	edgeHandler, edgeCleanups, err := buildEdgeHandler(ctx, kiosk, choraSessionValidator)
+	defer func() {
+		for i := len(edgeCleanups) - 1; i >= 0; i-- {
+			edgeCleanups[i]()
+		}
+	}()
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	corsHandler := httpadapter.CORSMiddleware(edgeHandler)
+
+	// Gateway-wide security response headers (2026-08-07). Three independent
+	// probes found the same gap on the same day: an authenticated OWASP ZAP
+	// scan of api.chora.site, a manual curl of /healthz and a 401 path, and
+	// tests/security/headers/headers_test.go, which had asserted seven headers
+	// the gateway never sent. chora-contracts/openapi/gateway.yaml documented a
+	// middleware chain that set them; the contract and the code disagreed and
+	// the code was wrong.
+	//
+	// The five SPA backend buckets already carry X-Frame-Options,
+	// X-Content-Type-Options and HSTS as customResponseHeaders at the CDN edge,
+	// so the browser surfaces were covered. The api backend service carried
+	// none, which is why the gateway was the gap. The guarantee lives in
+	// middleware so it travels with the service rather than depending on load
+	// balancer config.
+	//
+	// ORDER IS LOAD-BEARING, mirroring the chain gateway.yaml documents
+	// (CorrelationID first, then the rest, then CORS):
+	//
+	//	request -> OTel span -> CorrelationID -> SecurityHeaders -> CORS -> ...
+	//
+	// SecurityHeaders sits OUTSIDE CORSMiddleware so the OPTIONS preflight
+	// short-circuit (204, inner handler never runs) is covered too, and outside
+	// the JWT gate so a 401 carries the headers as surely as a 200.
+	// CorrelationID sits outside SecurityHeaders so the id exists before
+	// anything downstream can fail.
+	securedHandler := middleware.SecurityHeaders(corsHandler)
+	correlatedHandler := middleware.CorrelationID(securedHandler)
+	log.Printf("security headers WIRED: CSP + HSTS + X-Frame-Options + X-Content-Type-Options + Referrer-Policy + X-XSS-Protection; X-Correlation-ID generated when absent, propagated when present")
+
+	// OTel server-side request span — OUTERMOST so CORS + auth + routes
+	// all sit inside the trace. Closes FE-coord
+	// E2E-BE-AI-ASSIST-TRACE-EXPORT-PERM (2026-05-17) where gateway emitted
+	// zero Cloud Trace spans despite being the entry point of every
+	// browser-originated chain (libs/chora-go-common/tracing.Middleware
+	// was upgraded the same day to actually start spans; prior shim only
+	// managed W3C headers).
+	handler := observability.HTTPMiddleware()(correlatedHandler)
+
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		// kg/explore proxies a Vertex AI reasoning-engine cold call (~10-14s
+		// on first-request latency); per-route PerCallTimeout was bumped to 30s
+		// to match — the server WriteTimeout must exceed that.
+		WriteTimeout: 45 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	go func() {
+		log.Printf("service=%s version=%s listening on %s", serviceName, version, srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Printf("shutting down...")
+	drainCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(drainCtx); err != nil {
+		log.Printf("server shutdown error: %v", err)
+	}
+}
+
+// buildEdgeHandler composes every route of the gateway, inside the CORS, security-header,
+// correlation and tracing middleware that main() adds around it. It returns the cleanups of
+// the loaders it built (main() runs them at shutdown) and fails, instead of exiting, on a
+// loader error, so the kiosk's route census can build the real chain in a test.
+//
+// With the kiosk edition (kiosk non-nil) the O+ handler is built without governance and the
+// whole chain sits behind kiosk.routes: default deny, the conductor, the operator refusal.
+func buildEdgeHandler(ctx context.Context, kiosk *kioskEdition, choraSessionValidator *chorasession.Validator) (http.Handler, []func(), error) {
+	var cleanups []func()
 	routesRepo := inmem.NewRouteRepository()
 	sessionsRepo := inmem.NewSessionRepository()
 	refreshStore := inmem.NewRefreshStore()
@@ -115,30 +252,6 @@ func main() {
 		resolvers.NewCircleResolver(up, httpadapter.IdentityFromContext),
 	)
 
-	// chora-session HS256 Validator — Bucket 2/3 of the 2026-05-14 arch-gap
-	// closure. Validates Chora session JWTs minted by /api/v1/auth/session/mint
-	// on the /api/* trust boundary. Replaces the previous JWKS-backed
-	// the previous validator that produced "unknown signing key (kid)"
-	// 401s for every /api/me call.
-	//
-	// Signer key + issuer + audience all sourced from env / Secret Manager
-	// per `feedback_no_inline_config`. Fail-loud on any missing input — the
-	// boot env gate above has already enforced presence so this returning
-	// an error is exclusively a Secret Manager / network issue.
-	choraSessionValidator, choraSessionCleanup, err := NewChoraSessionValidatorFromEnv(ctx)
-	if err != nil {
-		log.Fatalf("chora-session validator init failed: %v", err)
-	}
-	defer func() {
-		if choraSessionCleanup != nil {
-			if err := choraSessionCleanup(); err != nil {
-				log.Printf("chora-session validator cleanup error: %v", err)
-			}
-		}
-	}()
-	log.Printf("chora-session validator wired (issuer=%s, aud=%s) — /api/* gated by HS256 chora-session",
-		os.Getenv(EnvChoraSessionIssuerURL), os.Getenv(EnvChoraSessionAudienceURL))
-
 	// C+ social aggregator (CHO-1457) — Phyllis MVP basic social
 	// discovery stubs (feed, profile, share, reactions, comments,
 	// public courses). Reads SVC_SHARING_URL + SVC_DELIVERY_URL env
@@ -166,15 +279,9 @@ func main() {
 	// haven't got a Chora session yet when they hit it.
 	mintHandler, mintCleanup, err := NewMintHandlerFromEnv(ctx, sessionsRepo, refreshStore)
 	if err != nil {
-		log.Fatalf("mint handler init failed: %v", err)
+		return nil, cleanups, fmt.Errorf("mint handler init failed: %w", err)
 	}
-	defer func() {
-		if mintCleanup != nil {
-			if err := mintCleanup(); err != nil {
-				log.Printf("mint cleanup error: %v", err)
-			}
-		}
-	}()
+	cleanups = append(cleanups, namedCleanup("mint cleanup error", mintCleanup))
 	if mintHandler == nil {
 		log.Printf("mint handler DISABLED (MINT_DISABLED=true) — POST /api/v1/auth/session/mint will 404")
 	} else {
@@ -184,24 +291,33 @@ func main() {
 	// Refresh endpoint (POST /api/v1/auth/session/refresh): exchanges a live
 	// refresh token for a rotated session pair. Anonymous like the mint route
 	// (the caller presents the refresh credential, not a Bearer header).
-	refreshHandler, err := httpadapter.NewRefreshHandler(httpadapter.RefreshHandlerConfig{
-		Mint:  mintHandler,
-		Store: refreshStore,
-	})
-	if err != nil {
-		log.Fatalf("refresh handler init failed: %v", err)
-	}
-	if refreshHandler == nil {
-		log.Printf("refresh handler DISABLED — POST /api/v1/auth/session/refresh will 404")
+	//
+	// The refresh path re-mints through the mint handler, so it cannot be built
+	// when the mint is disabled (the kiosk sets MINT_DISABLED=true). Skip it
+	// then: the route 404s exactly like the mint does.
+	var refreshHandler *httpadapter.RefreshHandler
+	if mintHandler != nil {
+		refreshHandler, err = httpadapter.NewRefreshHandler(httpadapter.RefreshHandlerConfig{
+			Mint:  mintHandler,
+			Store: refreshStore,
+		})
+		if err != nil {
+			return nil, cleanups, fmt.Errorf("refresh handler init failed: %w", err)
+		}
+		if refreshHandler == nil {
+			log.Printf("refresh handler DISABLED — POST /api/v1/auth/session/refresh will 404")
+		} else {
+			log.Printf("refresh handler wired — POST /api/v1/auth/session/refresh live")
+		}
 	} else {
-		log.Printf("refresh handler wired — POST /api/v1/auth/session/refresh live")
+		log.Printf("refresh handler DISABLED (mint disabled) — POST /api/v1/auth/session/refresh will 404")
 	}
 
 	// Logout endpoint (POST /api/v1/auth/logout): revokes the presented
 	// refresh record so sign-out ends the durable half of the session.
 	logoutHandler, err := httpadapter.NewLogoutHandler(refreshStore)
 	if err != nil {
-		log.Fatalf("logout handler init failed: %v", err)
+		return nil, cleanups, fmt.Errorf("logout handler init failed: %w", err)
 	}
 	log.Printf("logout handler wired — POST /api/v1/auth/logout live")
 
@@ -351,15 +467,9 @@ func main() {
 	// before WithChoraSessionOnPrefixes wraps the composite).
 	stripeConfigHandler, stripeConfigCleanup, err := NewStripeConfigHandlerFromEnv(ctx)
 	if err != nil {
-		log.Fatalf("stripe-config handler init failed: %v", err)
+		return nil, cleanups, fmt.Errorf("stripe-config handler init failed: %w", err)
 	}
-	defer func() {
-		if stripeConfigCleanup != nil {
-			if err := stripeConfigCleanup(); err != nil {
-				log.Printf("stripe-config cleanup error: %v", err)
-			}
-		}
-	}()
+	cleanups = append(cleanups, namedCleanup("stripe-config cleanup error", stripeConfigCleanup))
 	if stripeConfigHandler == nil {
 		log.Printf("stripe-config handler DISABLED (STRIPE_CONFIG_DISABLED=true) — GET /api/v1/stripe-config will 404")
 	} else {
@@ -378,15 +488,9 @@ func main() {
 	// to opt out in local dev).
 	paymentsCheckoutHandler, paymentsCleanup, err := NewPaymentsCheckoutHandlerFromEnv(ctx)
 	if err != nil {
-		log.Fatalf("payments handler init failed: %v", err)
+		return nil, cleanups, fmt.Errorf("payments handler init failed: %w", err)
 	}
-	defer func() {
-		if paymentsCleanup != nil {
-			if err := paymentsCleanup(); err != nil {
-				log.Printf("payments cleanup error: %v", err)
-			}
-		}
-	}()
+	cleanups = append(cleanups, namedCleanup("payments cleanup error", paymentsCleanup))
 	if paymentsCheckoutHandler == nil {
 		log.Printf("payments handler DISABLED (CHORA_PAYMENTS_DISABLED=true) — /api/v1/checkout/* will 404")
 	} else {
@@ -404,15 +508,9 @@ func main() {
 	// than bricking the gateway — see transaction_history_loader.go.
 	txHistoryHandler, txHistoryCleanup, err := NewTransactionHistoryHandlerFromEnv(ctx)
 	if err != nil {
-		log.Fatalf("transaction-history handler init failed: %v", err)
+		return nil, cleanups, fmt.Errorf("transaction-history handler init failed: %w", err)
 	}
-	defer func() {
-		if txHistoryCleanup != nil {
-			if err := txHistoryCleanup(); err != nil {
-				log.Printf("transaction-history cleanup error: %v", err)
-			}
-		}
-	}()
+	cleanups = append(cleanups, namedCleanup("transaction-history cleanup error", txHistoryCleanup))
 	if txHistoryHandler == nil {
 		log.Printf("transaction-history handler DISABLED (CHORA_TENANCY_GRPC_ADDR unset or CHORA_TRANSACTION_HISTORY_DISABLED=true) — /api/v1/{me,admin}/transactions* will 404")
 	} else {
@@ -430,15 +528,9 @@ func main() {
 	// an unset CHORA_TENANCY_GRPC_ADDR degrades (route 404), never bricks the gateway.
 	tenancyAdminHandler, tenancyAdminCleanup, err := NewTenancyAdminHandlerFromEnv(ctx)
 	if err != nil {
-		log.Fatalf("tenancy-admin handler init failed: %v", err)
+		return nil, cleanups, fmt.Errorf("tenancy-admin handler init failed: %w", err)
 	}
-	defer func() {
-		if tenancyAdminCleanup != nil {
-			if err := tenancyAdminCleanup(); err != nil {
-				log.Printf("tenancy-admin cleanup error: %v", err)
-			}
-		}
-	}()
+	cleanups = append(cleanups, namedCleanup("tenancy-admin cleanup error", tenancyAdminCleanup))
 	if tenancyAdminHandler == nil {
 		log.Printf("tenancy-admin handler DISABLED (CHORA_TENANCY_GRPC_ADDR unset or CHORA_TENANCY_ADMIN_DISABLED=true) — POST /api/v1/tenancy/sub-tenants will 404")
 	} else {
@@ -458,17 +550,11 @@ func main() {
 	//   empty = pending mode), CHORA_GATEWAY_UPSTREAM_FAKE (smoke fallback).
 	// Loader fails loud when any required addr is empty AND fake-mode is
 	// off (per feedback_no_stubs_real_wiring).
-	oplusHandler, oplusCleanup, oplusRoleResolver, err := NewOPlusHandlerFromEnv(ctx)
+	oplusHandler, oplusCleanup, oplusRoleResolver, err := newOPlusHandler(ctx, kiosk != nil)
 	if err != nil {
-		log.Fatalf("oplus loader failed: %v", err)
+		return nil, cleanups, fmt.Errorf("oplus loader failed: %w", err)
 	}
-	defer func() {
-		if oplusCleanup != nil {
-			if err := oplusCleanup(); err != nil {
-				log.Printf("oplus cleanup error: %v", err)
-			}
-		}
-	}()
+	cleanups = append(cleanups, namedCleanup("oplus cleanup error", oplusCleanup))
 	if upstream.IsFakeUpstreamAllowed() {
 		log.Printf("oplus handler WIRED (fake-mode) — CHORA_GATEWAY_UPSTREAM_FAKE=true, /bff/oplus/* will return error envelopes from nil clients")
 	} else {
@@ -531,14 +617,14 @@ func main() {
 			BaseURL: identityURL,
 		})
 		if err != nil {
-			log.Fatalf("webauthn passkey client init failed: %v", err)
+			return nil, cleanups, fmt.Errorf("webauthn passkey client init failed: %w", err)
 		}
 		webauthnHandler, err = httpadapter.NewWebAuthnHandler(httpadapter.WebAuthnHandlerConfig{
 			Passkey: passkeyClient,
 			Mint:    mintHandler, // nil (MINT_DISABLED) → login/finish 503
 		})
 		if err != nil {
-			log.Fatalf("webauthn handler init failed: %v", err)
+			return nil, cleanups, fmt.Errorf("webauthn handler init failed: %w", err)
 		}
 		log.Printf("webauthn handler wired — /api/v1/auth/webauthn/{register,login}/{begin,finish} live (identity=%s)", identityURL)
 	} else {
@@ -557,15 +643,9 @@ func main() {
 	// /api/v1/me/account + /api/v1/admin/ prefixes in DefaultJWTGatedPrefixes.
 	closureHandler, closureCleanup, err := NewClosureHandlerFromEnv(ctx)
 	if err != nil {
-		log.Fatalf("closure handler init failed: %v", err)
+		return nil, cleanups, fmt.Errorf("closure handler init failed: %w", err)
 	}
-	defer func() {
-		if closureCleanup != nil {
-			if err := closureCleanup(); err != nil {
-				log.Printf("closure cleanup error: %v", err)
-			}
-		}
-	}()
+	cleanups = append(cleanups, namedCleanup("closure cleanup error", closureCleanup))
 	if closureHandler == nil {
 		log.Printf("closure routes DEGRADED (%s unset) — closure trigger routes will 503 CLOSURE_UNAVAILABLE", EnvClosureOrchestratorURL)
 	} else {
@@ -582,7 +662,7 @@ func main() {
 	// via the /api/v1/me/growth-edges prefix in DefaultJWTGatedPrefixes.
 	weaknessResumeHandler, err := NewWeaknessResumeHandlerFromEnv(ctx)
 	if err != nil {
-		log.Fatalf("weakness-resume handler init failed: %v", err)
+		return nil, cleanups, fmt.Errorf("weakness-resume handler init failed: %w", err)
 	}
 	if weaknessResumeHandler == nil {
 		log.Printf("weakness-resume route DEGRADED (%s unset) — %s will 503 WEAKNESS_RESUME_UNAVAILABLE",
@@ -604,9 +684,9 @@ func main() {
 	// HTTPRoute (this pod's route caps requests at 60s).
 	realtimeTicketMinter, realtimeTicketCleanup, err := NewRealtimeTicketMinterFromEnvSM(ctx)
 	if err != nil {
-		log.Fatalf("realtime-ticket minter init failed: %v", err)
+		return nil, cleanups, fmt.Errorf("realtime-ticket minter init failed: %w", err)
 	}
-	defer func() { _ = realtimeTicketCleanup() }()
+	cleanups = append(cleanups, namedCleanup("realtime-ticket cleanup error", realtimeTicketCleanup))
 	if realtimeTicketMinter != nil {
 		log.Printf("realtime-ticket minter: WIRED — GET %s live (ADR-183)", httpadapter.RealtimeTicketPath)
 	} else {
@@ -686,71 +766,21 @@ func main() {
 		log.Printf("sendgrid webhook passthrough wired — POST /webhooks/sendgrid/events → %s", notificationsHTTPAddr)
 	}
 
-	corsHandler := httpadapter.CORSMiddleware(sendgridWebhookHandler)
-
-	// Gateway-wide security response headers (2026-08-07). Three independent
-	// probes found the same gap on the same day: an authenticated OWASP ZAP
-	// scan of api.chora.site, a manual curl of /healthz and a 401 path, and
-	// tests/security/headers/headers_test.go, which had asserted seven headers
-	// the gateway never sent. chora-contracts/openapi/gateway.yaml documented a
-	// middleware chain that set them; the contract and the code disagreed and
-	// the code was wrong.
-	//
-	// The five SPA backend buckets already carry X-Frame-Options,
-	// X-Content-Type-Options and HSTS as customResponseHeaders at the CDN edge,
-	// so the browser surfaces were covered. The api backend service carried
-	// none, which is why the gateway was the gap. The guarantee lives in
-	// middleware so it travels with the service rather than depending on load
-	// balancer config.
-	//
-	// ORDER IS LOAD-BEARING, mirroring the chain gateway.yaml documents
-	// (CorrelationID first, then the rest, then CORS):
-	//
-	//	request -> OTel span -> CorrelationID -> SecurityHeaders -> CORS -> ...
-	//
-	// SecurityHeaders sits OUTSIDE CORSMiddleware so the OPTIONS preflight
-	// short-circuit (204, inner handler never runs) is covered too, and outside
-	// the JWT gate so a 401 carries the headers as surely as a 200.
-	// CorrelationID sits outside SecurityHeaders so the id exists before
-	// anything downstream can fail.
-	securedHandler := middleware.SecurityHeaders(corsHandler)
-	correlatedHandler := middleware.CorrelationID(securedHandler)
-	log.Printf("security headers WIRED: CSP + HSTS + X-Frame-Options + X-Content-Type-Options + Referrer-Policy + X-XSS-Protection; X-Correlation-ID generated when absent, propagated when present")
-
-	// OTel server-side request span — OUTERMOST so CORS + auth + routes
-	// all sit inside the trace. Closes FE-coord
-	// E2E-BE-AI-ASSIST-TRACE-EXPORT-PERM (2026-05-17) where gateway emitted
-	// zero Cloud Trace spans despite being the entry point of every
-	// browser-originated chain (libs/chora-go-common/tracing.Middleware
-	// was upgraded the same day to actually start spans; prior shim only
-	// managed W3C headers).
-	handler := observability.HTTPMiddleware()(correlatedHandler)
-
-	srv := &http.Server{
-		Addr:              ":" + port,
-		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		// kg/explore proxies a Vertex AI reasoning-engine cold call (~10-14s
-		// on first-request latency); per-route PerCallTimeout was bumped to 30s
-		// to match — the server WriteTimeout must exceed that.
-		WriteTimeout: 45 * time.Second,
-		IdleTimeout:  60 * time.Second,
+	if kiosk != nil {
+		return kiosk.routes(choraSessionValidator, sendgridWebhookHandler), cleanups, nil
 	}
+	return sendgridWebhookHandler, cleanups, nil
+}
 
-	go func() {
-		log.Printf("service=%s version=%s listening on %s", serviceName, version, srv.Addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+// namedCleanup turns a loader's cleanup into a shutdown step that logs its own failure.
+func namedCleanup(what string, f func() error) func() {
+	return func() {
+		if f == nil {
+			return
 		}
-	}()
-
-	<-ctx.Done()
-	log.Printf("shutting down...")
-	drainCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(drainCtx); err != nil {
-		log.Printf("server shutdown error: %v", err)
+		if err := f(); err != nil {
+			log.Printf("%s: %v", what, err)
+		}
 	}
 }
 

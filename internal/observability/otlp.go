@@ -54,8 +54,13 @@ func Tracer() trace.Tracer { return otel.Tracer(ServiceName) }
 // silent on Cloud Trace because main.go never wrapped the handler with
 // any OTel-emitting middleware).
 //
+// untraced names paths served with no span at all (the kiosk edition's
+// container health probes, T1.11: one span per probe every few seconds
+// buried the boot lines). Empty, every path is traced — the cloud
+// edition's behaviour, unchanged.
+//
 // Mount as the OUTERMOST middleware in main.go so CORS preflights, auth
 // gates, and routes all sit inside the request span.
-func HTTPMiddleware() func(next http.Handler) http.Handler {
-	return commontracing.Middleware()
+func HTTPMiddleware(untraced ...string) func(next http.Handler) http.Handler {
+	return commontracing.Middleware(commontracing.WithoutSpanFor(untraced...))
 }

@@ -345,13 +345,14 @@ func (h *MintHandler) Reissue(ctx context.Context, access string, issuedAt time.
 		return MintResponse{}, err
 	}
 	if err := h.refreshStore.SaveRefresh(ctx, &session.RefreshRecord{
-		Token:     refreshTok,
-		Gcid:      gcid,
-		Email:     email,
-		TenantID:  tenantID,
-		Roles:     append([]string(nil), activeRoles...),
-		IssuedAt:  issuedAt,
-		ExpiresAt: issuedAt.Add(h.refreshTTL),
+		Token:       refreshTok,
+		Gcid:        gcid,
+		Email:       email,
+		TenantID:    tenantID,
+		Roles:       append([]string(nil), activeRoles...),
+		Memberships: toSessionMemberships(memberships),
+		IssuedAt:    issuedAt,
+		ExpiresAt:   issuedAt.Add(h.refreshTTL),
 	}); err != nil {
 		return MintResponse{}, err
 	}
@@ -399,20 +400,30 @@ func (h *MintHandler) ReissueFor(ctx context.Context, gcid, email, tenantID stri
 //
 // The caller has already pre-checked the presented token (GetRefresh) for a
 // clean error message; ReplaceRefresh re-checks atomically and is authoritative.
-func (h *MintHandler) RotateReissue(ctx context.Context, oldToken, gcid, email, tenantID string, roles []string) (MintResponse, error) {
+func (h *MintHandler) RotateReissue(ctx context.Context, oldToken, gcid, email, tenantID string, roles []string, priorMemberships []session.Membership) (MintResponse, error) {
 	now := h.now()
 	newRefresh, err := newOpaqueToken()
 	if err != nil {
 		return MintResponse{}, err
 	}
+	// Carry the prior snapshot forward: the refresh record is the only durable
+	// place the caller's surfaces live, and the BFF seeds its surface rail from
+	// memberships[].surfaces. Re-resolving here is not an option for a
+	// password-authenticated session — chora-identity's resolve route requires a
+	// firebase_uid, which those identities do not carry.
+	memberships := priorMemberships
+	if memberships == nil {
+		memberships = []session.Membership{}
+	}
 	if err := h.refreshStore.ReplaceRefresh(ctx, oldToken, &session.RefreshRecord{
-		Token:     newRefresh,
-		Gcid:      gcid,
-		Email:     email,
-		TenantID:  tenantID,
-		Roles:     append([]string(nil), roles...),
-		IssuedAt:  now,
-		ExpiresAt: now.Add(h.refreshTTL),
+		Token:       newRefresh,
+		Gcid:        gcid,
+		Email:       email,
+		TenantID:    tenantID,
+		Roles:       append([]string(nil), roles...),
+		Memberships: memberships,
+		IssuedAt:    now,
+		ExpiresAt:   now.Add(h.refreshTTL),
 	}); err != nil {
 		return MintResponse{}, err
 	}
@@ -437,7 +448,44 @@ func (h *MintHandler) RotateReissue(ctx context.Context, oldToken, gcid, email, 
 		RefreshToken:     newRefresh,
 		RefreshExpiresIn: int(h.refreshTTL.Seconds()),
 		GCID:             gcid,
+		Memberships:      fromSessionMemberships(memberships),
 	}, nil
+}
+
+// toSessionMemberships snapshots the wire membership DTOs onto the refresh
+// record; fromSessionMemberships projects them back for the response.
+func toSessionMemberships(in []clients.ResolveTenantMembership) []session.Membership {
+	if in == nil {
+		return nil
+	}
+	out := make([]session.Membership, 0, len(in))
+	for _, m := range in {
+		out = append(out, session.Membership{
+			TenantID:   m.TenantID,
+			TenantSlug: m.TenantSlug,
+			Roles:      append([]string(nil), m.Roles...),
+			Surfaces:   append([]string(nil), m.Surfaces...),
+			IsDefault:  m.IsDefault,
+		})
+	}
+	return out
+}
+
+func fromSessionMemberships(in []session.Membership) []clients.ResolveTenantMembership {
+	if in == nil {
+		return nil
+	}
+	out := make([]clients.ResolveTenantMembership, 0, len(in))
+	for _, m := range in {
+		out = append(out, clients.ResolveTenantMembership{
+			TenantID:   m.TenantID,
+			TenantSlug: m.TenantSlug,
+			Roles:      append([]string(nil), m.Roles...),
+			Surfaces:   append([]string(nil), m.Surfaces...),
+			IsDefault:  m.IsDefault,
+		})
+	}
+	return out
 }
 
 // newOpaqueToken mints a 256-bit url-safe opaque token for refresh records.

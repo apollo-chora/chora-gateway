@@ -405,6 +405,9 @@ func NewGatewayProxyMux(agg *gatewayproxy.Aggregator) http.Handler {
 	// (downstream runs the Recommender + Companion LLM calls to completion). The
 	// fast deterministic dose stays phyllis-owned at /api/companion/daily-dose.
 	mux.HandleFunc("/api/companion/daily-dose/ai", h.handleDailyDoseAI)
+	// K49 (kiosk D8): the greeting-only call for one named Companion. POST
+	// only; consumption wires it in the kiosk edition alone (404 otherwise).
+	mux.HandleFunc("/api/companion/greeting", h.handleCompanionGreeting)
 	// CHO-2261 — A+ atom read on the /v1/ prefix (atom.service.ts). The exact
 	// collection leaf + the /{id} subtree. Both TRANSLATE to chora-creation
 	// /api/atoms[/{id}] (the mesh-allowlisted downstream). GET-only; the
@@ -590,6 +593,9 @@ func matchesGatewayProxyPath(p string) bool {
 		"/api/companion/daily-dose/ai",
 		// ADR-254 D9 alias, drop after the SPA cut (WP-X go)
 		"/api/familiar/daily-dose/ai",
+		// K49 (kiosk D8): the greeting-only call, exact path. Owned here so it
+		// does NOT fall through to the Phyllis /api/companion/ subtree.
+		"/api/companion/greeting",
 		// CHO-2261 — A+ atom collection leaf (GET /api/v1/atoms). The /{id}
 		// subtree is claimed via the loop below. Translated to chora-creation
 		// /api/atoms. Owned here so it does NOT fall through to the Phyllis base.
@@ -1160,6 +1166,26 @@ func (h *GatewayProxyHandler) handleDailyDoseAI(w http.ResponseWriter, r *http.R
 		return
 	}
 	resp, _ := h.agg.GetDailyDoseAI(r.Context(), gatewayProxyAuthFromRequest(r))
+	writeGatewayProxyResp(w, resp)
+}
+
+// -----------------------------------------------------------------------------
+// POST /api/companion/greeting: K49 (kiosk D8, ADR-259 D11), the greeting-only
+// call for one named Companion. Body verbatim to chora-consumption
+// /companion/greeting; its answer (a failure included) passes through.
+// -----------------------------------------------------------------------------
+
+func (h *GatewayProxyHandler) handleCompanionGreeting(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "GATEWAY_METHOD_NOT_ALLOWED",
+			"POST only on /api/companion/greeting")
+		return
+	}
+	resp, err := h.agg.PostCompanionGreeting(r.Context(), gatewayProxyAuthFromRequest(r), readBody(r))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "GATEWAY_UPSTREAM_ERROR", err.Error())
+		return
+	}
 	writeGatewayProxyResp(w, resp)
 }
 

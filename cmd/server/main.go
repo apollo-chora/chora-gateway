@@ -172,7 +172,12 @@ func main() {
 	// browser-originated chain (libs/chora-go-common/tracing.Middleware
 	// was upgraded the same day to actually start spans; prior shim only
 	// managed W3C headers).
-	handler := observability.HTTPMiddleware()(correlatedHandler)
+	//
+	// The kiosk edition passes its health probes as untraced (T1.11): the
+	// container probes /healthz and /readyz every few seconds, and a span per
+	// probe rotated the boot lines out of the logs. The cloud edition passes
+	// nothing, so every path is traced as before.
+	handler := observability.HTTPMiddleware(kiosk.untracedPaths()...)(correlatedHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + port,

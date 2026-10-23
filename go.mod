@@ -3,7 +3,7 @@ module github.com/apollo-chora/chora-gateway
 go 1.26.1
 
 require (
-	github.com/apollo-chora/chora-common v0.0.0-20261005042719-5373c91ce52b
+	github.com/apollo-chora/chora-common v0.0.0-20261023005333-31ff4ffc4d8c
 	github.com/apollo-chora/chora-contracts/gen/go v0.0.0-20261005030823-832afca4af5b
 	github.com/google/uuid v1.6.0
 	go.opentelemetry.io/otel v1.44.0
